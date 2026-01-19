@@ -1,0 +1,16 @@
+{
+    "rdbms": "postgresql",
+    "host": "127.0.0.1",
+    "port": 5432,
+    "dbname": "pay_test",
+    "user": "test",
+    "passwd": "123456",
+    "tables": [
+        "pay_order",
+        "pay_payment",
+        "pay_callback",
+        "pay_refund",
+        "pay_ledger",
+        "pay_idempotency"
+    ]
+}
