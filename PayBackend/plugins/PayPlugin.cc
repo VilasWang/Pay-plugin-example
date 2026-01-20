@@ -1320,7 +1320,8 @@ void PayPlugin::handleWechatCallback(
              plaintext,
              body,
              signature,
-             serial](const drogon::orm::DrogonDbException &) {
+             serial,
+             plainJson](const drogon::orm::DrogonDbException &) {
                 const std::string requestHash = drogon::utils::getSha256(body);
                 PayIdempotencyModel idemp;
                 idemp.setIdempotencyKey(idempotencyKey);
