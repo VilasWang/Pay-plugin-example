@@ -2,11 +2,13 @@ cmake_minimum_required(VERSION 3.5)
 project(PayBackendTests CXX)
 
 find_package(Drogon CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 set(TEST_SRC
     test_main.cc
     PayAuthFilterTest.cc
     PayUtilsTest.cc
+    WechatPayClientTest.cc
 )
 
 add_executable(
@@ -14,6 +16,7 @@ add_executable(
     ${TEST_SRC}
     ../filters/PayAuthFilter.cc
     ../filters/PayAuthMetrics.cc
+    ../plugins/WechatPayClient.cc
     ../utils/PayUtils.cc
 )
 
@@ -22,7 +25,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../utils
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE Drogon::Drogon)
+target_link_libraries(${PROJECT_NAME} PRIVATE Drogon::Drogon OpenSSL::Crypto OpenSSL::SSL)
 
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/../models/orm_compat.h")
