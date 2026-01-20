@@ -359,3 +359,18 @@ DROGON_TEST(WechatPayClient_DecryptResource_ShortCiphertext)
     CHECK(!client.decryptResource("c2hvcnQ=", "nonce", "aad", plaintext, error));
     CHECK(error == "ciphertext too short");
 }
+
+DROGON_TEST(WechatPayClient_DecryptResource_InvalidTag)
+{
+    Json::Value config;
+    config["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    WechatPayClient client(config);
+
+    std::string plaintext;
+    std::string error;
+    const std::string fakeCiphertext =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    CHECK(!client.decryptResource(fakeCiphertext, "nonce", "aad", plaintext,
+                                  error));
+    CHECK(error == "decrypt final failed");
+}
