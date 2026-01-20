@@ -347,3 +347,15 @@ DROGON_TEST(WechatPayClient_DecryptResource_InvalidKey)
                                   error));
     CHECK(error == "api_v3_key must be 32 bytes");
 }
+
+DROGON_TEST(WechatPayClient_DecryptResource_ShortCiphertext)
+{
+    Json::Value config;
+    config["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    WechatPayClient client(config);
+
+    std::string plaintext;
+    std::string error;
+    CHECK(!client.decryptResource("c2hvcnQ=", "nonce", "aad", plaintext, error));
+    CHECK(error == "ciphertext too short");
+}
