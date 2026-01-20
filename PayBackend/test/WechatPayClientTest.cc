@@ -334,3 +334,16 @@ DROGON_TEST(WechatPayClient_VerifyCallback_MissingCert)
                                  error));
     CHECK(error == "platform_cert_path is not configured");
 }
+
+DROGON_TEST(WechatPayClient_DecryptResource_InvalidKey)
+{
+    Json::Value config;
+    config["api_v3_key"] = "short_key";
+    WechatPayClient client(config);
+
+    std::string plaintext;
+    std::string error;
+    CHECK(!client.decryptResource("ciphertext", "nonce", "aad", plaintext,
+                                  error));
+    CHECK(error == "api_v3_key must be 32 bytes");
+}
