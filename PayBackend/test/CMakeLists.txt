@@ -5,10 +5,17 @@ find_package(Drogon CONFIG REQUIRED)
 
 set(TEST_SRC
     test_main.cc
+    PayAuthFilterTest.cc
     PayUtilsTest.cc
 )
 
-add_executable(${PROJECT_NAME} ${TEST_SRC} ../utils/PayUtils.cc)
+add_executable(
+    ${PROJECT_NAME}
+    ${TEST_SRC}
+    ../filters/PayAuthFilter.cc
+    ../filters/PayAuthMetrics.cc
+    ../utils/PayUtils.cc
+)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../
