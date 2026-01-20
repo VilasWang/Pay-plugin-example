@@ -1,7 +1,9 @@
 #include <drogon/drogon_test.h>
 #include <drogon/nosql/RedisClient.h>
 #include <drogon/orm/DbClient.h>
+#include <drogon/orm/Mapper.h>
 #include <drogon/utils/Utilities.h>
+#include "../models/PayIdempotency.h"
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -170,4 +172,50 @@ DROGON_TEST(PayIdempotency_RedisSetNx)
         },
         "DEL %s",
         key.c_str());
+}
+
+DROGON_TEST(PayIdempotency_OrmRoundTrip)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+        "idempotency_key VARCHAR(64) PRIMARY KEY,"
+        "request_hash TEXT NOT NULL,"
+        "response_snapshot TEXT,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "expires_at TIMESTAMPTZ NOT NULL)");
+
+    using PayIdempotency = drogon_model::pay_test::PayIdempotency;
+    drogon::orm::Mapper<PayIdempotency> mapper(client);
+
+    const std::string key = "orm_" + drogon::utils::getUuid();
+    PayIdempotency row;
+    row.setIdempotencyKey(key);
+    row.setRequestHash("hash");
+    row.setResponseSnapshot("{\"ok\":true}");
+    const auto now = trantor::Date::now();
+    const auto expiresAt = trantor::Date(
+        now.microSecondsSinceEpoch() + 3600LL * 1000000LL);
+    row.setExpiresAt(expiresAt);
+
+    mapper.insert(row);
+
+    const auto fetched = mapper.findByPrimaryKey(key);
+    CHECK(fetched.getValueOfIdempotencyKey() == key);
+    CHECK(fetched.getValueOfRequestHash() == "hash");
+    CHECK(fetched.getValueOfResponseSnapshot() == "{\"ok\":true}");
+
+    mapper.deleteByPrimaryKey(key);
 }
