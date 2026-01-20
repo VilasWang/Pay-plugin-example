@@ -285,3 +285,40 @@ DROGON_TEST(WechatPayClient_VerifyCallback)
     std::error_code ec;
     std::filesystem::remove(certPath, ec);
 }
+
+DROGON_TEST(WechatPayClient_VerifyCallback_SerialMismatch)
+{
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto certPath =
+        tempDir / ("wechatpay_test_" + drogon::utils::getUuid() + ".pem");
+    {
+        std::ofstream out(certPath.string(), std::ios::binary);
+        out << certPem;
+    }
+
+    Json::Value config;
+    config["platform_cert_path"] = certPath.string();
+    config["serial_no"] = "SERIAL";
+    WechatPayClient client(config);
+
+    const std::string timestamp = "1700000000";
+    const std::string nonce = "nonce";
+    const std::string body = R"({"id":"test"})";
+    const std::string message = timestamp + "\n" + nonce + "\n" + body + "\n";
+
+    std::string signatureB64;
+    CHECK(signMessage(message, pkey, signatureB64));
+
+    std::string error;
+    CHECK(!client.verifyCallback(timestamp, nonce, body, signatureB64,
+                                  "OTHER_SERIAL", error));
+    CHECK(error == "serial number mismatch");
+
+    EVP_PKEY_free(pkey);
+    std::error_code ec;
+    std::filesystem::remove(certPath, ec);
+}
