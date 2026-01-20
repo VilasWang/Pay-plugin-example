@@ -322,3 +322,15 @@ DROGON_TEST(WechatPayClient_VerifyCallback_SerialMismatch)
     std::error_code ec;
     std::filesystem::remove(certPath, ec);
 }
+
+DROGON_TEST(WechatPayClient_VerifyCallback_MissingCert)
+{
+    Json::Value config;
+    config["serial_no"] = "SERIAL";
+    WechatPayClient client(config);
+
+    std::string error;
+    CHECK(!client.verifyCallback("1700000000", "nonce", "{}", "sig", "SERIAL",
+                                 error));
+    CHECK(error == "platform_cert_path is not configured");
+}
