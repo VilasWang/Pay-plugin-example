@@ -54,4 +54,5 @@ target_sources(${PROJECT_NAME}
                ${UTILS_SRC}
                ${MODEL_SRC})
 
+enable_testing()
 add_subdirectory(test)
