@@ -5,6 +5,7 @@ find_package(Drogon CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 set(TEST_SRC
+    IdempotencyIntegrationTest.cc
     test_main.cc
     PayAuthFilterTest.cc
     PayUtilsTest.cc
