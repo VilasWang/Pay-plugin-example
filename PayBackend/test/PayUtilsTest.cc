@@ -72,3 +72,16 @@ DROGON_TEST(PayUtils_MapRefundStatus)
     CHECK(pay::utils::mapRefundStatus("ABNORMAL") == "REFUND_FAIL");
     CHECK(pay::utils::mapRefundStatus("PROCESSING") == "REFUNDING");
 }
+
+DROGON_TEST(PayUtils_ToJsonString)
+{
+    Json::Value root;
+    root["order_id"] = "order_1";
+    root["amount"] = 1200;
+
+    const auto json = pay::utils::toJsonString(root);
+
+    CHECK(json.find('\n') == std::string::npos);
+    CHECK(json.find("\"order_id\"") != std::string::npos);
+    CHECK(json.find("\"amount\"") != std::string::npos);
+}
