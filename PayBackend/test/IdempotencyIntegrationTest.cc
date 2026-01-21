@@ -3,6 +3,7 @@
 #include <drogon/orm/DbClient.h>
 #include <drogon/orm/Mapper.h>
 #include <drogon/utils/Utilities.h>
+#include "../models/PayCallback.h"
 #include "../models/PayIdempotency.h"
 #include <filesystem>
 #include <fstream>
@@ -218,4 +219,57 @@ DROGON_TEST(PayIdempotency_OrmRoundTrip)
     CHECK(fetched.getValueOfResponseSnapshot() == "{\"ok\":true}");
 
     mapper.deleteByPrimaryKey(key);
+}
+
+DROGON_TEST(PayCallback_OrmRoundTrip)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_callback ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "payment_no VARCHAR(64) NOT NULL,"
+        "raw_body TEXT NOT NULL,"
+        "signature VARCHAR(256),"
+        "serial_no VARCHAR(64),"
+        "verified BOOLEAN NOT NULL DEFAULT FALSE,"
+        "processed BOOLEAN NOT NULL DEFAULT FALSE,"
+        "received_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    using PayCallback = drogon_model::pay_test::PayCallback;
+    drogon::orm::Mapper<PayCallback> mapper(client);
+
+    PayCallback row;
+    row.setPaymentNo("pay_" + drogon::utils::getUuid());
+    row.setRawBody("{\"resource\":{}}");
+    row.setSignature("sig");
+    row.setSerialNo("serial");
+    row.setVerified(true);
+    row.setProcessed(false);
+    row.setReceivedAt(trantor::Date::now());
+
+    mapper.insert(row);
+    const auto id = row.getValueOfId();
+    CHECK(id > 0);
+
+    const auto fetched = mapper.findByPrimaryKey(id);
+    CHECK(fetched.getValueOfPaymentNo() == row.getValueOfPaymentNo());
+    CHECK(fetched.getValueOfRawBody() == row.getValueOfRawBody());
+    CHECK(fetched.getValueOfSignature() == row.getValueOfSignature());
+    CHECK(fetched.getValueOfSerialNo() == row.getValueOfSerialNo());
+    CHECK(fetched.getValueOfVerified() == row.getValueOfVerified());
+    CHECK(fetched.getValueOfProcessed() == row.getValueOfProcessed());
+
+    mapper.deleteByPrimaryKey(id);
 }

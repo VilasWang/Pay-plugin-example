@@ -22,6 +22,7 @@ add_executable(
     ${TEST_SRC}
     ../filters/PayAuthFilter.cc
     ../filters/PayAuthMetrics.cc
+    ../models/PayCallback.cc
     ../models/PayIdempotency.cc
     ../plugins/WechatPayClient.cc
     ../utils/PayUtils.cc
