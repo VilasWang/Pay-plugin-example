@@ -5,6 +5,7 @@
 #include <drogon/utils/Utilities.h>
 #include "../models/PayCallback.h"
 #include "../models/PayIdempotency.h"
+#include "../models/PayPayment.h"
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -270,6 +271,67 @@ DROGON_TEST(PayCallback_OrmRoundTrip)
     CHECK(fetched.getValueOfSerialNo() == row.getValueOfSerialNo());
     CHECK(fetched.getValueOfVerified() == row.getValueOfVerified());
     CHECK(fetched.getValueOfProcessed() == row.getValueOfProcessed());
+
+    mapper.deleteByPrimaryKey(id);
+}
+
+DROGON_TEST(PayPayment_OrmRoundTrip)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_payment ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "order_no VARCHAR(64) NOT NULL,"
+        "payment_no VARCHAR(64) NOT NULL UNIQUE,"
+        "channel_trade_no VARCHAR(64),"
+        "status VARCHAR(24) NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "request_payload TEXT,"
+        "response_payload TEXT,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    using PayPayment = drogon_model::pay_test::PayPayment;
+    drogon::orm::Mapper<PayPayment> mapper(client);
+
+    const auto orderNo = "order_" + drogon::utils::getUuid();
+    const auto paymentNo = "pay_" + drogon::utils::getUuid();
+
+    PayPayment row;
+    row.setOrderNo(orderNo);
+    row.setPaymentNo(paymentNo);
+    row.setChannelTradeNo("wx_" + drogon::utils::getUuid());
+    row.setStatus("SUCCESS");
+    row.setAmount("12.34");
+    row.setRequestPayload("{\"request\":true}");
+    row.setResponsePayload("{\"response\":true}");
+
+    mapper.insert(row);
+    const auto id = row.getValueOfId();
+    CHECK(id > 0);
+
+    const auto fetched = mapper.findByPrimaryKey(id);
+    CHECK(fetched.getValueOfOrderNo() == orderNo);
+    CHECK(fetched.getValueOfPaymentNo() == paymentNo);
+    CHECK(fetched.getValueOfChannelTradeNo() == row.getValueOfChannelTradeNo());
+    CHECK(fetched.getValueOfStatus() == "SUCCESS");
+    CHECK(fetched.getValueOfAmount() == "12.34");
+    CHECK(fetched.getValueOfRequestPayload() ==
+          row.getValueOfRequestPayload());
+    CHECK(fetched.getValueOfResponsePayload() ==
+          row.getValueOfResponsePayload());
 
     mapper.deleteByPrimaryKey(id);
 }

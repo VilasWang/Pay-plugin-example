@@ -24,6 +24,7 @@ add_executable(
     ../filters/PayAuthMetrics.cc
     ../models/PayCallback.cc
     ../models/PayIdempotency.cc
+    ../models/PayPayment.cc
     ../plugins/WechatPayClient.cc
     ../utils/PayUtils.cc
 )
