@@ -410,3 +410,14 @@ DROGON_TEST(WechatPayClient_VerifyCallback_InvalidSignature)
     std::error_code ec;
     std::filesystem::remove(certPath, ec);
 }
+
+DROGON_TEST(WechatPayClient_DecryptResource_MissingKey)
+{
+    Json::Value config;
+    WechatPayClient client(config);
+
+    std::string plaintext;
+    std::string error;
+    CHECK(!client.decryptResource("c2hvcnQ=", "nonce", "aad", plaintext, error));
+    CHECK(error == "api_v3_key is not configured");
+}
