@@ -34,9 +34,13 @@ DROGON_TEST(PayUtils_ParseAmountToFen)
     CHECK(pay::utils::parseAmountToFen("0.01", fen));
     CHECK(fen == 1);
 
+    CHECK(pay::utils::parseAmountToFen(".5", fen));
+    CHECK(fen == 50);
+
     CHECK(!pay::utils::parseAmountToFen("", fen));
     CHECK(!pay::utils::parseAmountToFen("12.345", fen));
     CHECK(!pay::utils::parseAmountToFen("12.a", fen));
+    CHECK(!pay::utils::parseAmountToFen("-1.00", fen));
 }
 
 DROGON_TEST(PayUtils_MapTradeState)
