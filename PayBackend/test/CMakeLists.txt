@@ -25,6 +25,7 @@ add_executable(
     ../models/PayCallback.cc
     ../models/PayIdempotency.cc
     ../models/PayPayment.cc
+    ../models/PayRefund.cc
     ../plugins/WechatPayClient.cc
     ../utils/PayUtils.cc
 )

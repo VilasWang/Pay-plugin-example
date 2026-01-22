@@ -6,6 +6,7 @@
 #include "../models/PayCallback.h"
 #include "../models/PayIdempotency.h"
 #include "../models/PayPayment.h"
+#include "../models/PayRefund.h"
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -332,6 +333,64 @@ DROGON_TEST(PayPayment_OrmRoundTrip)
           row.getValueOfRequestPayload());
     CHECK(fetched.getValueOfResponsePayload() ==
           row.getValueOfResponsePayload());
+
+    mapper.deleteByPrimaryKey(id);
+}
+
+DROGON_TEST(PayRefund_OrmRoundTrip)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_refund ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "refund_no VARCHAR(64) NOT NULL UNIQUE,"
+        "order_no VARCHAR(64) NOT NULL,"
+        "payment_no VARCHAR(64) NOT NULL,"
+        "channel_refund_no VARCHAR(64),"
+        "status VARCHAR(24) NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> mapper(client);
+
+    const auto refundNo = "refund_" + drogon::utils::getUuid();
+    const auto orderNo = "order_" + drogon::utils::getUuid();
+    const auto paymentNo = "pay_" + drogon::utils::getUuid();
+
+    PayRefund row;
+    row.setRefundNo(refundNo);
+    row.setOrderNo(orderNo);
+    row.setPaymentNo(paymentNo);
+    row.setChannelRefundNo("wxr_" + drogon::utils::getUuid());
+    row.setStatus("SUCCESS");
+    row.setAmount("5.67");
+
+    mapper.insert(row);
+    const auto id = row.getValueOfId();
+    CHECK(id > 0);
+
+    const auto fetched = mapper.findByPrimaryKey(id);
+    CHECK(fetched.getValueOfRefundNo() == refundNo);
+    CHECK(fetched.getValueOfOrderNo() == orderNo);
+    CHECK(fetched.getValueOfPaymentNo() == paymentNo);
+    CHECK(fetched.getValueOfChannelRefundNo() ==
+          row.getValueOfChannelRefundNo());
+    CHECK(fetched.getValueOfStatus() == "SUCCESS");
+    CHECK(fetched.getValueOfAmount() == "5.67");
 
     mapper.deleteByPrimaryKey(id);
 }
