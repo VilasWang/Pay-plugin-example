@@ -5,6 +5,7 @@
 #include <drogon/utils/Utilities.h>
 #include "../models/PayCallback.h"
 #include "../models/PayIdempotency.h"
+#include "../models/PayOrder.h"
 #include "../models/PayPayment.h"
 #include "../models/PayRefund.h"
 #include <filesystem>
@@ -391,6 +392,68 @@ DROGON_TEST(PayRefund_OrmRoundTrip)
           row.getValueOfChannelRefundNo());
     CHECK(fetched.getValueOfStatus() == "SUCCESS");
     CHECK(fetched.getValueOfAmount() == "5.67");
+
+    mapper.deleteByPrimaryKey(id);
+}
+
+DROGON_TEST(PayOrder_OrmRoundTrip)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_order ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "order_no VARCHAR(64) NOT NULL UNIQUE,"
+        "user_id BIGINT NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "currency VARCHAR(8) NOT NULL DEFAULT 'CNY',"
+        "status VARCHAR(24) NOT NULL,"
+        "channel VARCHAR(16) NOT NULL,"
+        "title VARCHAR(128) NOT NULL,"
+        "expire_at TIMESTAMPTZ,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    using PayOrder = drogon_model::pay_test::PayOrder;
+    drogon::orm::Mapper<PayOrder> mapper(client);
+
+    const auto orderNo = "order_" + drogon::utils::getUuid();
+    const int64_t userId = 12345;
+    const auto expireAt = trantor::Date::now().after(3600.0);
+
+    PayOrder row;
+    row.setOrderNo(orderNo);
+    row.setUserId(userId);
+    row.setAmount("9.99");
+    row.setCurrency("CNY");
+    row.setStatus("CREATED");
+    row.setChannel("WECHAT");
+    row.setTitle("Test Order");
+    row.setExpireAt(expireAt);
+
+    mapper.insert(row);
+    const auto id = row.getValueOfId();
+    CHECK(id > 0);
+
+    const auto fetched = mapper.findByPrimaryKey(id);
+    CHECK(fetched.getValueOfOrderNo() == orderNo);
+    CHECK(fetched.getValueOfUserId() == userId);
+    CHECK(fetched.getValueOfAmount() == "9.99");
+    CHECK(fetched.getValueOfCurrency() == "CNY");
+    CHECK(fetched.getValueOfStatus() == "CREATED");
+    CHECK(fetched.getValueOfChannel() == "WECHAT");
+    CHECK(fetched.getValueOfTitle() == "Test Order");
 
     mapper.deleteByPrimaryKey(id);
 }
