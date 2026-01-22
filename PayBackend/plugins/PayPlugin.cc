@@ -1117,30 +1117,98 @@ void PayPlugin::createPayment(
         return;
     }
 
-    drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
-    auto idempCriteria =
-        drogon::orm::Criteria(PayIdempotencyModel::Cols::_idempotency_key,
-                              drogon::orm::CompareOperator::EQ,
-                              idempotencyKey);
-    idempMapper.findOne(
-        idempCriteria,
-        [callbackPtr, requestHash](const PayIdempotencyModel &row) {
+    auto respondIdempotencyConflict = [callbackPtr]() {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k409Conflict);
+        resp->setBody("idempotency key conflict");
+        (*callbackPtr)(resp);
+    };
+
+    auto respondIdempotencyInProgress = [callbackPtr]() {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k409Conflict);
+        resp->setBody("idempotency key in progress");
+        (*callbackPtr)(resp);
+    };
+
+    auto respondIdempotencySnapshot =
+        [callbackPtr, requestHash, respondIdempotencyConflict](
+            const PayIdempotencyModel &row) {
             if (row.getValueOfRequestHash() != requestHash)
             {
-                auto resp = drogon::HttpResponse::newHttpResponse();
-                resp->setStatusCode(drogon::k409Conflict);
-                resp->setBody("idempotency key conflict");
-                (*callbackPtr)(resp);
+                respondIdempotencyConflict();
                 return;
             }
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
             resp->setBody(row.getValueOfResponseSnapshot());
             (*callbackPtr)(resp);
-        },
-        [proceedWithCreate](const drogon::orm::DrogonDbException &) {
-            proceedWithCreate();
-        });
+        };
+
+    auto queryIdempotencyOrProceed =
+        [this,
+         idempotencyKey,
+         respondIdempotencySnapshot,
+         proceedWithCreate]() {
+            drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
+            auto idempCriteria =
+                drogon::orm::Criteria(
+                    PayIdempotencyModel::Cols::_idempotency_key,
+                    drogon::orm::CompareOperator::EQ,
+                    idempotencyKey);
+            idempMapper.findOne(
+                idempCriteria,
+                respondIdempotencySnapshot,
+                [proceedWithCreate](const drogon::orm::DrogonDbException &) {
+                    proceedWithCreate();
+                });
+        };
+
+    auto queryIdempotencyOrConflict =
+        [this,
+         idempotencyKey,
+         respondIdempotencySnapshot,
+         respondIdempotencyInProgress]() {
+            drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
+            auto idempCriteria =
+                drogon::orm::Criteria(
+                    PayIdempotencyModel::Cols::_idempotency_key,
+                    drogon::orm::CompareOperator::EQ,
+                    idempotencyKey);
+            idempMapper.findOne(
+                idempCriteria,
+                respondIdempotencySnapshot,
+                [respondIdempotencyInProgress](
+                    const drogon::orm::DrogonDbException &) {
+                    respondIdempotencyInProgress();
+                });
+        };
+
+    if (useRedisIdempotency_ && redisClient_)
+    {
+        const std::string redisKey = "pay:idempotency:" + idempotencyKey;
+        redisClient_->execCommandAsync(
+            [queryIdempotencyOrConflict,
+             queryIdempotencyOrProceed](const drogon::nosql::RedisResult &result) {
+                if (result.type() == drogon::nosql::RedisResultType::kNil)
+                {
+                    queryIdempotencyOrConflict();
+                    return;
+                }
+                queryIdempotencyOrProceed();
+            },
+            [queryIdempotencyOrProceed](
+                const drogon::nosql::RedisException &) {
+                queryIdempotencyOrProceed();
+            },
+            "SET %s %s NX EX %d",
+            redisKey.c_str(),
+            requestHash.c_str(),
+            static_cast<int>(idempotencyTtlSeconds_));
+        return;
+    }
+
+    queryIdempotencyOrProceed();
 }
 
 void PayPlugin::queryOrder(
@@ -1303,30 +1371,98 @@ void PayPlugin::refund(
         return;
     }
 
-    drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
-    auto idempCriteria =
-        drogon::orm::Criteria(PayIdempotencyModel::Cols::_idempotency_key,
-                              drogon::orm::CompareOperator::EQ,
-                              idempotencyKey);
-    idempMapper.findOne(
-        idempCriteria,
-        [callbackPtr, requestHash](const PayIdempotencyModel &row) {
+    auto respondIdempotencyConflict = [callbackPtr]() {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k409Conflict);
+        resp->setBody("idempotency key conflict");
+        (*callbackPtr)(resp);
+    };
+
+    auto respondIdempotencyInProgress = [callbackPtr]() {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k409Conflict);
+        resp->setBody("idempotency key in progress");
+        (*callbackPtr)(resp);
+    };
+
+    auto respondIdempotencySnapshot =
+        [callbackPtr, requestHash, respondIdempotencyConflict](
+            const PayIdempotencyModel &row) {
             if (row.getValueOfRequestHash() != requestHash)
             {
-                auto resp = drogon::HttpResponse::newHttpResponse();
-                resp->setStatusCode(drogon::k409Conflict);
-                resp->setBody("idempotency key conflict");
-                (*callbackPtr)(resp);
+                respondIdempotencyConflict();
                 return;
             }
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
             resp->setBody(row.getValueOfResponseSnapshot());
             (*callbackPtr)(resp);
-        },
-        [proceedWithRefund](const drogon::orm::DrogonDbException &) {
-            proceedWithRefund();
-        });
+        };
+
+    auto queryIdempotencyOrProceed =
+        [this,
+         idempotencyKey,
+         respondIdempotencySnapshot,
+         proceedWithRefund]() {
+            drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
+            auto idempCriteria =
+                drogon::orm::Criteria(
+                    PayIdempotencyModel::Cols::_idempotency_key,
+                    drogon::orm::CompareOperator::EQ,
+                    idempotencyKey);
+            idempMapper.findOne(
+                idempCriteria,
+                respondIdempotencySnapshot,
+                [proceedWithRefund](const drogon::orm::DrogonDbException &) {
+                    proceedWithRefund();
+                });
+        };
+
+    auto queryIdempotencyOrConflict =
+        [this,
+         idempotencyKey,
+         respondIdempotencySnapshot,
+         respondIdempotencyInProgress]() {
+            drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
+            auto idempCriteria =
+                drogon::orm::Criteria(
+                    PayIdempotencyModel::Cols::_idempotency_key,
+                    drogon::orm::CompareOperator::EQ,
+                    idempotencyKey);
+            idempMapper.findOne(
+                idempCriteria,
+                respondIdempotencySnapshot,
+                [respondIdempotencyInProgress](
+                    const drogon::orm::DrogonDbException &) {
+                    respondIdempotencyInProgress();
+                });
+        };
+
+    if (useRedisIdempotency_ && redisClient_)
+    {
+        const std::string redisKey = "pay:idempotency:" + idempotencyKey;
+        redisClient_->execCommandAsync(
+            [queryIdempotencyOrConflict,
+             queryIdempotencyOrProceed](const drogon::nosql::RedisResult &result) {
+                if (result.type() == drogon::nosql::RedisResultType::kNil)
+                {
+                    queryIdempotencyOrConflict();
+                    return;
+                }
+                queryIdempotencyOrProceed();
+            },
+            [queryIdempotencyOrProceed](
+                const drogon::nosql::RedisException &) {
+                queryIdempotencyOrProceed();
+            },
+            "SET %s %s NX EX %d",
+            redisKey.c_str(),
+            requestHash.c_str(),
+            static_cast<int>(idempotencyTtlSeconds_));
+        return;
+    }
+
+    queryIdempotencyOrProceed();
 }
 
 void PayPlugin::queryRefund(
