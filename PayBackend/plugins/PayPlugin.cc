@@ -64,6 +64,47 @@ void insertLedgerEntry(
         });
 }
 
+void storeIdempotencySnapshot(
+    const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+    const std::string &idempotencyKey,
+    const std::string &requestHash,
+    const std::string &responseSnapshot,
+    int64_t ttlSeconds)
+{
+    if (!dbClient || idempotencyKey.empty())
+    {
+        return;
+    }
+
+    PayIdempotencyModel idemp;
+    idemp.setIdempotencyKey(idempotencyKey);
+    idemp.setRequestHash(requestHash);
+    idemp.setResponseSnapshot(responseSnapshot);
+    const auto now = trantor::Date::now();
+    const auto expiresAt = trantor::Date(
+        now.microSecondsSinceEpoch() +
+        ttlSeconds * static_cast<int64_t>(1000000));
+    idemp.setExpiresAt(expiresAt);
+
+    drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient);
+    idempMapper.insert(
+        idemp,
+        [](const PayIdempotencyModel &) {},
+        [](const drogon::orm::DrogonDbException &e) {
+            LOG_ERROR << "Idempotency insert error: " << e.base().what();
+        });
+}
+
+std::string resolveIdempotencyKey(const drogon::HttpRequestPtr &req)
+{
+    auto key = req->getHeader("Idempotency-Key");
+    if (key.empty())
+    {
+        key = req->getHeader("X-Idempotency-Key");
+    }
+    return key;
+}
+
 
 }  // namespace
 
@@ -454,84 +495,18 @@ void PayPlugin::syncRefundStatusFromWechat(
         });
 }
 
-void PayPlugin::createPayment(
-    const drogon::HttpRequestPtr &req,
-    std::function<void(const drogon::HttpResponsePtr &)> &&callback)
+void PayPlugin::proceedCreatePayment(
+    const std::shared_ptr<std::function<void(const drogon::HttpResponsePtr &)>> &callbackPtr,
+    const std::string &orderNo,
+    const std::string &paymentNo,
+    const std::string &amount,
+    const std::string &currency,
+    const std::string &title,
+    int64_t totalFen,
+    int64_t userIdValue,
+    const std::string &idempotencyKey,
+    const std::string &requestHash)
 {
-    if (!dbClient_)
-    {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k500InternalServerError);
-        resp->setBody("db client not ready");
-        callback(resp);
-        return;
-    }
-
-    if (!wechatClient_)
-    {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k501NotImplemented);
-        resp->setBody("wechat client not ready");
-        callback(resp);
-        return;
-    }
-
-    auto json = req->getJsonObject();
-    if (!json)
-    {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k400BadRequest);
-        resp->setBody("invalid json");
-        callback(resp);
-        return;
-    }
-
-    std::string userId;
-    std::string amount;
-    std::string title;
-    if (!getRequiredString(*json, "user_id", userId) ||
-        !getRequiredString(*json, "amount", amount) ||
-        !getRequiredString(*json, "title", title))
-    {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k400BadRequest);
-        resp->setBody("missing user_id/amount/title");
-        callback(resp);
-        return;
-    }
-
-    std::string currency = (*json).get("currency", "CNY").asString();
-    std::string orderNo = drogon::utils::getUuid();
-    std::string paymentNo = drogon::utils::getUuid();
-
-    int64_t totalFen = 0;
-    if (!parseAmountToFen(amount, totalFen))
-    {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k400BadRequest);
-        resp->setBody("invalid amount format");
-        callback(resp);
-        return;
-    }
-
-    int64_t userIdValue = 0;
-    try
-    {
-        userIdValue = std::stoll(userId);
-    }
-    catch (...)
-    {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k400BadRequest);
-        resp->setBody("invalid user_id");
-        callback(resp);
-        return;
-    }
-
-    auto callbackPtr =
-        std::make_shared<std::function<void(const drogon::HttpResponsePtr &)>>(
-            std::move(callback));
-
     drogon::orm::Mapper<PayOrderModel> orderMapper(dbClient_);
     PayOrderModel order;
     order.setOrderNo(orderNo);
@@ -559,8 +534,9 @@ void PayPlugin::createPayment(
          paymentNo,
          amount,
          payload,
-         requestPayload](
-            const PayOrderModel &) {
+         requestPayload,
+         idempotencyKey,
+         requestHash](const PayOrderModel &) {
             drogon::orm::Mapper<PayPaymentModel> paymentMapper(dbClient_);
             PayPaymentModel payment;
             payment.setOrderNo(orderNo);
@@ -577,11 +553,17 @@ void PayPlugin::createPayment(
                  callbackPtr,
                  orderNo,
                  paymentNo,
-                 payload](
-                    const PayPaymentModel &) {
+                 payload,
+                 idempotencyKey,
+                 requestHash](const PayPaymentModel &) {
                     wechatClient_->createTransactionNative(
                         payload,
-                        [this, callbackPtr, orderNo, paymentNo](
+                        [this,
+                         callbackPtr,
+                         orderNo,
+                         paymentNo,
+                         idempotencyKey,
+                         requestHash](
                             const Json::Value &result,
                             const std::string &error) {
                             if (!error.empty())
@@ -658,8 +640,14 @@ void PayPlugin::createPayment(
                                 paymentNo);
                             paymentMapper.findOne(
                                 payCriteria,
-                                [this, callbackPtr, orderNo, paymentNo, result,
-                                 responsePayload](PayPaymentModel payment) {
+                                [this,
+                                 callbackPtr,
+                                 orderNo,
+                                 paymentNo,
+                                 result,
+                                 responsePayload,
+                                 idempotencyKey,
+                                 requestHash](PayPaymentModel payment) {
                                     payment.setStatus("PROCESSING");
                                     payment.setResponsePayload(
                                         responsePayload);
@@ -669,8 +657,13 @@ void PayPlugin::createPayment(
                                         paymentUpdater(dbClient_);
                                     paymentUpdater.update(
                                         payment,
-                                        [this, callbackPtr, orderNo, paymentNo,
-                                         result](const size_t) {
+                                        [this,
+                                         callbackPtr,
+                                         orderNo,
+                                         paymentNo,
+                                         result,
+                                         idempotencyKey,
+                                         requestHash](const size_t) {
                                             drogon::orm::Mapper<PayOrderModel>
                                                 orderMapper(dbClient_);
                                             auto orderCriteria =
@@ -682,8 +675,13 @@ void PayPlugin::createPayment(
                                                     orderNo);
                                             orderMapper.findOne(
                                                 orderCriteria,
-                                                [this, callbackPtr, orderNo,
-                                                 paymentNo, result](
+                                                [this,
+                                                 callbackPtr,
+                                                 orderNo,
+                                                 paymentNo,
+                                                 result,
+                                                 idempotencyKey,
+                                                 requestHash](
                                                     PayOrderModel order) {
                                                     order.setStatus("PAYING");
                                                     order.setUpdatedAt(
@@ -694,9 +692,13 @@ void PayPlugin::createPayment(
                                                             dbClient_);
                                                     orderUpdater.update(
                                                         order,
-                                                        [callbackPtr, orderNo,
+                                                        [this,
+                                                         callbackPtr,
+                                                         orderNo,
                                                          paymentNo,
-                                                         result](
+                                                         result,
+                                                         idempotencyKey,
+                                                         requestHash](
                                                             const size_t) {
                                                             Json::Value body;
                                                             body["order_no"] =
@@ -707,6 +709,14 @@ void PayPlugin::createPayment(
                                                                 "PAYING";
                                                             body["wechat_response"] =
                                                                 result;
+                                                            const std::string responseSnapshot =
+                                                                toJsonString(body);
+                                                            storeIdempotencySnapshot(
+                                                                dbClient_,
+                                                                idempotencyKey,
+                                                                requestHash,
+                                                                responseSnapshot,
+                                                                idempotencyTtlSeconds_);
                                                             auto resp =
                                                                 drogon::
                                                                     HttpResponse::
@@ -785,6 +795,351 @@ void PayPlugin::createPayment(
             resp->setStatusCode(drogon::k500InternalServerError);
             resp->setBody(std::string("db error: ") + e.base().what());
             (*callbackPtr)(resp);
+        });
+}
+
+void PayPlugin::proceedRefund(
+    const std::shared_ptr<std::function<void(const drogon::HttpResponsePtr &)>> &callbackPtr,
+    const std::string &refundNo,
+    const std::string &orderNo,
+    const std::string &paymentNo,
+    const std::string &amount,
+    const std::string &idempotencyKey,
+    const std::string &requestHash)
+{
+    drogon::orm::Mapper<PayOrderModel> orderMapper(dbClient_);
+    auto criteria = drogon::orm::Criteria(PayOrderModel::Cols::_order_no,
+                                          drogon::orm::CompareOperator::EQ,
+                                          orderNo);
+    orderMapper.findOne(
+        criteria,
+        [this,
+         callbackPtr,
+         refundNo,
+         orderNo,
+         paymentNo,
+         amount,
+         idempotencyKey,
+         requestHash](const PayOrderModel &order) {
+            const std::string orderAmount = order.getValueOfAmount();
+            const std::string currency = order.getValueOfCurrency();
+
+            int64_t refundFen = 0;
+            int64_t totalFen = 0;
+            if (!parseAmountToFen(amount, refundFen) ||
+                !parseAmountToFen(orderAmount, totalFen))
+            {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setStatusCode(drogon::k400BadRequest);
+                resp->setBody("invalid amount format");
+                (*callbackPtr)(resp);
+                return;
+            }
+
+            drogon::orm::Mapper<PayRefundModel> refundMapper(dbClient_);
+            PayRefundModel refund;
+            refund.setRefundNo(refundNo);
+            refund.setOrderNo(orderNo);
+            refund.setPaymentNo(paymentNo);
+            refund.setStatus("REFUND_INIT");
+            refund.setAmount(amount);
+            refund.setCreatedAt(trantor::Date::now());
+            refund.setUpdatedAt(trantor::Date::now());
+
+            refundMapper.insert(
+                refund,
+                [this,
+                 callbackPtr,
+                 refundNo,
+                 orderNo,
+                 refundFen,
+                 totalFen,
+                 currency,
+                 idempotencyKey,
+                 requestHash](const PayRefundModel &) {
+                    if (!wechatClient_)
+                    {
+                        auto resp =
+                            drogon::HttpResponse::newHttpResponse();
+                        resp->setStatusCode(drogon::k501NotImplemented);
+                        resp->setBody("wechat client not ready");
+                        (*callbackPtr)(resp);
+                        return;
+                    }
+
+                    Json::Value payload;
+                    payload["out_trade_no"] = orderNo;
+                    payload["out_refund_no"] = refundNo;
+                    payload["amount"]["refund"] =
+                        static_cast<Json::Int64>(refundFen);
+                    payload["amount"]["total"] =
+                        static_cast<Json::Int64>(totalFen);
+                    payload["amount"]["currency"] = currency;
+
+                    wechatClient_->refund(
+                        payload,
+                        [this,
+                         callbackPtr,
+                         refundNo,
+                         orderNo,
+                         idempotencyKey,
+                         requestHash](
+                            const Json::Value &result,
+                            const std::string &error) {
+                            if (!error.empty())
+                            {
+                                auto resp =
+                                    drogon::HttpResponse::newHttpResponse();
+                                resp->setStatusCode(
+                                    drogon::k502BadGateway);
+                                resp->setBody("wechat error: " + error);
+                                (*callbackPtr)(resp);
+                                return;
+                            }
+
+                            std::string refundStatus = "REFUNDING";
+                            const std::string wechatStatus =
+                                result.get("status", "").asString();
+                            const std::string refundId =
+                                result.get("refund_id", "").asString();
+                            if (wechatStatus == "SUCCESS")
+                            {
+                                refundStatus = "REFUND_SUCCESS";
+                            }
+                            else if (wechatStatus == "CLOSED")
+                            {
+                                refundStatus = "REFUND_FAIL";
+                            }
+
+                            drogon::orm::Mapper<PayRefundModel> refundMapper(
+                                dbClient_);
+                            auto refundCriteria = drogon::orm::Criteria(
+                                PayRefundModel::Cols::_refund_no,
+                                drogon::orm::CompareOperator::EQ,
+                                refundNo);
+                            refundMapper.findOne(
+                                refundCriteria,
+                                [this,
+                                 callbackPtr,
+                                 refundNo,
+                                 orderNo,
+                                 refundStatus,
+                                 result,
+                                 refundId,
+                                 idempotencyKey,
+                                 requestHash](PayRefundModel refund) {
+                                    refund.setStatus(refundStatus);
+                                    refund.setChannelRefundNo(refundId);
+                                    refund.setUpdatedAt(trantor::Date::now());
+                                    drogon::orm::Mapper<PayRefundModel>
+                                        refundUpdater(dbClient_);
+                                    refundUpdater.update(
+                                        refund,
+                                        [this,
+                                         callbackPtr,
+                                         refundNo,
+                                         orderNo,
+                                         refundStatus,
+                                         result,
+                                         idempotencyKey,
+                                         requestHash](const size_t) {
+                                            Json::Value body;
+                                            body["refund_no"] = refundNo;
+                                            body["order_no"] = orderNo;
+                                            body["status"] = refundStatus;
+                                            body["wechat_response"] = result;
+                                            const std::string responseSnapshot =
+                                                toJsonString(body);
+                                            storeIdempotencySnapshot(
+                                                dbClient_,
+                                                idempotencyKey,
+                                                requestHash,
+                                                responseSnapshot,
+                                                idempotencyTtlSeconds_);
+                                            auto resp =
+                                                drogon::HttpResponse::
+                                                    newHttpJsonResponse(body);
+                                            (*callbackPtr)(resp);
+                                        },
+                                        [callbackPtr](
+                                            const drogon::orm::
+                                                DrogonDbException &e) {
+                                            auto resp =
+                                                drogon::HttpResponse::
+                                                    newHttpResponse();
+                                            resp->setStatusCode(
+                                                drogon::k500InternalServerError);
+                                            resp->setBody(
+                                                std::string("db error: ") +
+                                                e.base().what());
+                                            (*callbackPtr)(resp);
+                                        });
+                                },
+                                [callbackPtr](const drogon::orm::DrogonDbException &e) {
+                                    auto resp =
+                                        drogon::HttpResponse::newHttpResponse();
+                                    resp->setStatusCode(
+                                        drogon::k500InternalServerError);
+                                    resp->setBody(
+                                        std::string("db error: ") +
+                                        e.base().what());
+                                    (*callbackPtr)(resp);
+                                });
+                        });
+                },
+                [callbackPtr](const drogon::orm::DrogonDbException &e) {
+                    auto resp = drogon::HttpResponse::newHttpResponse();
+                    resp->setStatusCode(drogon::k500InternalServerError);
+                    resp->setBody(std::string("db error: ") + e.base().what());
+                    (*callbackPtr)(resp);
+                });
+        },
+        [callbackPtr](const drogon::orm::DrogonDbException &e) {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k404NotFound);
+            resp->setBody(std::string("order not found: ") + e.base().what());
+            (*callbackPtr)(resp);
+        });
+}
+
+void PayPlugin::createPayment(
+    const drogon::HttpRequestPtr &req,
+    std::function<void(const drogon::HttpResponsePtr &)> &&callback)
+{
+    if (!dbClient_)
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k500InternalServerError);
+        resp->setBody("db client not ready");
+        callback(resp);
+        return;
+    }
+
+    if (!wechatClient_)
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k501NotImplemented);
+        resp->setBody("wechat client not ready");
+        callback(resp);
+        return;
+    }
+
+    auto json = req->getJsonObject();
+    if (!json)
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k400BadRequest);
+        resp->setBody("invalid json");
+        callback(resp);
+        return;
+    }
+
+    std::string userId;
+    std::string amount;
+    std::string title;
+    if (!getRequiredString(*json, "user_id", userId) ||
+        !getRequiredString(*json, "amount", amount) ||
+        !getRequiredString(*json, "title", title))
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k400BadRequest);
+        resp->setBody("missing user_id/amount/title");
+        callback(resp);
+        return;
+    }
+
+    std::string currency = (*json).get("currency", "CNY").asString();
+    std::string orderNo = drogon::utils::getUuid();
+    std::string paymentNo = drogon::utils::getUuid();
+
+    int64_t totalFen = 0;
+    if (!parseAmountToFen(amount, totalFen))
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k400BadRequest);
+        resp->setBody("invalid amount format");
+        callback(resp);
+        return;
+    }
+
+    int64_t userIdValue = 0;
+    try
+    {
+        userIdValue = std::stoll(userId);
+    }
+    catch (...)
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k400BadRequest);
+        resp->setBody("invalid user_id");
+        callback(resp);
+        return;
+    }
+
+    const auto rawIdempotencyKey = resolveIdempotencyKey(req);
+    const std::string idempotencyKey =
+        rawIdempotencyKey.empty() ? "" : "create:" + rawIdempotencyKey;
+    const std::string requestHash =
+        rawIdempotencyKey.empty()
+            ? ""
+            : drogon::utils::getSha256(std::string(req->body()));
+
+    auto callbackPtr =
+        std::make_shared<std::function<void(const drogon::HttpResponsePtr &)>>(
+            std::move(callback));
+
+    auto proceedWithCreate = [this,
+                              callbackPtr,
+                              orderNo,
+                              paymentNo,
+                              amount,
+                              currency,
+                              title,
+                              totalFen,
+                              userIdValue,
+                              idempotencyKey,
+                              requestHash]() {
+        proceedCreatePayment(callbackPtr,
+                             orderNo,
+                             paymentNo,
+                             amount,
+                             currency,
+                             title,
+                             totalFen,
+                             userIdValue,
+                             idempotencyKey,
+                             requestHash);
+    };
+
+    if (idempotencyKey.empty())
+    {
+        proceedWithCreate();
+        return;
+    }
+
+    drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
+    auto idempCriteria =
+        drogon::orm::Criteria(PayIdempotencyModel::Cols::_idempotency_key,
+                              drogon::orm::CompareOperator::EQ,
+                              idempotencyKey);
+    idempMapper.findOne(
+        idempCriteria,
+        [callbackPtr, requestHash](const PayIdempotencyModel &row) {
+            if (row.getValueOfRequestHash() != requestHash)
+            {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setStatusCode(drogon::k409Conflict);
+                resp->setBody("idempotency key conflict");
+                (*callbackPtr)(resp);
+                return;
+            }
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            resp->setBody(row.getValueOfResponseSnapshot());
+            (*callbackPtr)(resp);
+        },
+        [proceedWithCreate](const drogon::orm::DrogonDbException &) {
+            proceedWithCreate();
         });
 }
 
@@ -913,164 +1268,64 @@ void PayPlugin::refund(
     std::string paymentNo = (*json).get("payment_no", "").asString();
     std::string refundNo = drogon::utils::getUuid();
 
+    const auto rawIdempotencyKey = resolveIdempotencyKey(req);
+    const std::string idempotencyKey =
+        rawIdempotencyKey.empty() ? "" : "refund:" + rawIdempotencyKey;
+    const std::string requestHash =
+        rawIdempotencyKey.empty()
+            ? ""
+            : drogon::utils::getSha256(std::string(req->body()));
+
     auto callbackPtr =
         std::make_shared<std::function<void(const drogon::HttpResponsePtr &)>>(
             std::move(callback));
 
-    drogon::orm::Mapper<PayOrderModel> orderMapper(dbClient_);
-    auto criteria = drogon::orm::Criteria(PayOrderModel::Cols::_order_no,
-                                          drogon::orm::CompareOperator::EQ,
-                                          orderNo);
-    orderMapper.findOne(
-        criteria,
-        [this, callbackPtr, refundNo, orderNo, paymentNo, amount](
-            const PayOrderModel &order) {
-            const std::string orderAmount = order.getValueOfAmount();
-            const std::string currency = order.getValueOfCurrency();
+    auto proceedWithRefund = [this,
+                              callbackPtr,
+                              refundNo,
+                              orderNo,
+                              paymentNo,
+                              amount,
+                              idempotencyKey,
+                              requestHash]() {
+        proceedRefund(callbackPtr,
+                      refundNo,
+                      orderNo,
+                      paymentNo,
+                      amount,
+                      idempotencyKey,
+                      requestHash);
+    };
 
-            int64_t refundFen = 0;
-            int64_t totalFen = 0;
-            if (!parseAmountToFen(amount, refundFen) ||
-                !parseAmountToFen(orderAmount, totalFen))
+    if (idempotencyKey.empty())
+    {
+        proceedWithRefund();
+        return;
+    }
+
+    drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
+    auto idempCriteria =
+        drogon::orm::Criteria(PayIdempotencyModel::Cols::_idempotency_key,
+                              drogon::orm::CompareOperator::EQ,
+                              idempotencyKey);
+    idempMapper.findOne(
+        idempCriteria,
+        [callbackPtr, requestHash](const PayIdempotencyModel &row) {
+            if (row.getValueOfRequestHash() != requestHash)
             {
                 auto resp = drogon::HttpResponse::newHttpResponse();
-                resp->setStatusCode(drogon::k400BadRequest);
-                resp->setBody("invalid amount format");
+                resp->setStatusCode(drogon::k409Conflict);
+                resp->setBody("idempotency key conflict");
                 (*callbackPtr)(resp);
                 return;
             }
-
-            drogon::orm::Mapper<PayRefundModel> refundMapper(dbClient_);
-            PayRefundModel refund;
-            refund.setRefundNo(refundNo);
-            refund.setOrderNo(orderNo);
-            refund.setPaymentNo(paymentNo);
-            refund.setStatus("REFUND_INIT");
-            refund.setAmount(amount);
-            refund.setCreatedAt(trantor::Date::now());
-            refund.setUpdatedAt(trantor::Date::now());
-
-            refundMapper.insert(
-                refund,
-                [this, callbackPtr, refundNo, orderNo, refundFen, totalFen, currency](
-                    const PayRefundModel &) {
-                    if (!wechatClient_)
-                    {
-                        auto resp =
-                            drogon::HttpResponse::newHttpResponse();
-                        resp->setStatusCode(drogon::k501NotImplemented);
-                        resp->setBody("wechat client not ready");
-                        (*callbackPtr)(resp);
-                        return;
-                    }
-
-                    Json::Value payload;
-                    payload["out_trade_no"] = orderNo;
-                    payload["out_refund_no"] = refundNo;
-                    payload["amount"]["refund"] =
-                        static_cast<Json::Int64>(refundFen);
-                    payload["amount"]["total"] =
-                        static_cast<Json::Int64>(totalFen);
-                    payload["amount"]["currency"] = currency;
-
-                    wechatClient_->refund(
-                        payload,
-                        [this, callbackPtr, refundNo, orderNo](
-                            const Json::Value &result,
-                            const std::string &error) {
-                            if (!error.empty())
-                            {
-                                auto resp =
-                                    drogon::HttpResponse::newHttpResponse();
-                                resp->setStatusCode(
-                                    drogon::k502BadGateway);
-                                resp->setBody("wechat error: " + error);
-                                (*callbackPtr)(resp);
-                                return;
-                            }
-
-                            std::string refundStatus = "REFUNDING";
-                            const std::string wechatStatus =
-                                result.get("status", "").asString();
-                            const std::string refundId =
-                                result.get("refund_id", "").asString();
-                            if (wechatStatus == "SUCCESS")
-                            {
-                                refundStatus = "REFUND_SUCCESS";
-                            }
-                            else if (wechatStatus == "CLOSED")
-                            {
-                                refundStatus = "REFUND_FAIL";
-                            }
-
-                            drogon::orm::Mapper<PayRefundModel> refundMapper(
-                                dbClient_);
-                            auto refundCriteria = drogon::orm::Criteria(
-                                PayRefundModel::Cols::_refund_no,
-                                drogon::orm::CompareOperator::EQ,
-                                refundNo);
-                                refundMapper.findOne(
-                                    refundCriteria,
-                                    [this, callbackPtr, refundNo, orderNo, refundStatus,
-                                 result, refundId](
-                                        PayRefundModel refund) {
-                                        refund.setStatus(refundStatus);
-                                        refund.setChannelRefundNo(refundId);
-                                        refund.setUpdatedAt(trantor::Date::now());
-                                        drogon::orm::Mapper<PayRefundModel>
-                                            refundUpdater(dbClient_);
-                                    refundUpdater.update(
-                                        refund,
-                                        [callbackPtr, refundNo, orderNo,
-                                         refundStatus, result](const size_t) {
-                                            Json::Value body;
-                                            body["refund_no"] = refundNo;
-                                            body["order_no"] = orderNo;
-                                            body["status"] = refundStatus;
-                                            body["wechat_response"] = result;
-                                            auto resp =
-                                                drogon::HttpResponse::
-                                                    newHttpJsonResponse(body);
-                                            (*callbackPtr)(resp);
-                                        },
-                                        [callbackPtr](
-                                            const drogon::orm::
-                                                DrogonDbException &e) {
-                                            auto resp =
-                                                drogon::HttpResponse::
-                                                    newHttpResponse();
-                                            resp->setStatusCode(
-                                                drogon::k500InternalServerError);
-                                            resp->setBody(
-                                                std::string("db error: ") +
-                                                e.base().what());
-                                            (*callbackPtr)(resp);
-                                        });
-                                },
-                                [callbackPtr](const drogon::orm::DrogonDbException &e) {
-                                    auto resp =
-                                        drogon::HttpResponse::newHttpResponse();
-                                    resp->setStatusCode(
-                                        drogon::k500InternalServerError);
-                                    resp->setBody(
-                                        std::string("db error: ") +
-                                        e.base().what());
-                                    (*callbackPtr)(resp);
-                                });
-                        });
-                },
-                [callbackPtr](const drogon::orm::DrogonDbException &e) {
-                    auto resp = drogon::HttpResponse::newHttpResponse();
-                    resp->setStatusCode(drogon::k500InternalServerError);
-                    resp->setBody(std::string("db error: ") + e.base().what());
-                    (*callbackPtr)(resp);
-                });
-        },
-        [callbackPtr](const drogon::orm::DrogonDbException &e) {
             auto resp = drogon::HttpResponse::newHttpResponse();
-            resp->setStatusCode(drogon::k404NotFound);
-            resp->setBody(std::string("order not found: ") + e.base().what());
+            resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            resp->setBody(row.getValueOfResponseSnapshot());
             (*callbackPtr)(resp);
+        },
+        [proceedWithRefund](const drogon::orm::DrogonDbException &) {
+            proceedWithRefund();
         });
 }
 
@@ -1754,3 +2009,5 @@ void PayPlugin::handleWechatCallback(
 
     proceedWithDb();
 }
+
+

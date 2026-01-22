@@ -48,6 +48,25 @@ class PayPlugin : public drogon::Plugin<PayPlugin>
         const std::string &refundNo,
         const Json::Value &result,
         std::function<void(const std::string &refundStatus)> &&done);
+    void proceedCreatePayment(
+        const std::shared_ptr<std::function<void(const drogon::HttpResponsePtr &)>> &callbackPtr,
+        const std::string &orderNo,
+        const std::string &paymentNo,
+        const std::string &amount,
+        const std::string &currency,
+        const std::string &title,
+        int64_t totalFen,
+        int64_t userIdValue,
+        const std::string &idempotencyKey,
+        const std::string &requestHash);
+    void proceedRefund(
+        const std::shared_ptr<std::function<void(const drogon::HttpResponsePtr &)>> &callbackPtr,
+        const std::string &refundNo,
+        const std::string &orderNo,
+        const std::string &paymentNo,
+        const std::string &amount,
+        const std::string &idempotencyKey,
+        const std::string &requestHash);
 
     Json::Value pluginConfig_;
     std::shared_ptr<WechatPayClient> wechatClient_;
