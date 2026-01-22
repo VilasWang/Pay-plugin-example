@@ -9,6 +9,7 @@ find_package(Drogon CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 set(TEST_SRC
+    ControllerMetricsTest.cc
     IdempotencyIntegrationTest.cc
     test_main.cc
     PayAuthFilterTest.cc
@@ -28,6 +29,8 @@ add_executable(
     ../models/PayOrder.cc
     ../models/PayPayment.cc
     ../models/PayRefund.cc
+    ../controllers/MetricsController.cc
+    ../controllers/PayMetricsController.cc
     ../plugins/WechatPayClient.cc
     ../utils/PayUtils.cc
 )
