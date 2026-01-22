@@ -1,6 +1,7 @@
 #include "PayPlugin.h"
 #include "../models/PayCallback.h"
 #include "../models/PayIdempotency.h"
+#include "../models/PayLedger.h"
 #include "../models/PayOrder.h"
 #include "../models/PayPayment.h"
 #include "../models/PayRefund.h"
@@ -19,11 +20,49 @@ using PayPaymentModel = drogon_model::pay_test::PayPayment;
 using PayRefundModel = drogon_model::pay_test::PayRefund;
 using PayCallbackModel = drogon_model::pay_test::PayCallback;
 using PayIdempotencyModel = drogon_model::pay_test::PayIdempotency;
+using PayLedgerModel = drogon_model::pay_test::PayLedger;
 using pay::utils::getRequiredString;
 using pay::utils::parseAmountToFen;
 using pay::utils::toJsonString;
 using pay::utils::mapTradeState;
 using pay::utils::mapRefundStatus;
+
+void insertLedgerEntry(
+    const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+    int64_t userId,
+    const std::string &orderNo,
+    const std::string &paymentNo,
+    const std::string &entryType,
+    const std::string &amount)
+{
+    if (!dbClient)
+    {
+        return;
+    }
+
+    PayLedgerModel ledger;
+    ledger.setUserId(userId);
+    ledger.setOrderNo(orderNo);
+    if (paymentNo.empty())
+    {
+        ledger.setPaymentNoToNull();
+    }
+    else
+    {
+        ledger.setPaymentNo(paymentNo);
+    }
+    ledger.setEntryType(entryType);
+    ledger.setAmount(amount);
+    ledger.setCreatedAt(trantor::Date::now());
+
+    drogon::orm::Mapper<PayLedgerModel> ledgerMapper(dbClient);
+    ledgerMapper.insert(
+        ledger,
+        [](const PayLedgerModel &) {},
+        [](const drogon::orm::DrogonDbException &e) {
+            LOG_ERROR << "Ledger insert error: " << e.base().what();
+        });
+}
 
 
 }  // namespace
@@ -356,6 +395,9 @@ void PayPlugin::syncRefundStatusFromWechat(
                 }
                 return;
             }
+            const auto orderNo = refund.getValueOfOrderNo();
+            const auto paymentNo = refund.getValueOfPaymentNo();
+            const auto refundAmount = refund.getValueOfAmount();
             refund.setStatus(refundStatus);
             refund.setChannelRefundNo(refundId);
             refund.setUpdatedAt(trantor::Date::now());
@@ -363,10 +405,42 @@ void PayPlugin::syncRefundStatusFromWechat(
             drogon::orm::Mapper<PayRefundModel> refundUpdater(dbClient_);
             refundUpdater.update(
                 refund,
-                [done, refundStatus](const size_t) {
+                [this,
+                 done,
+                 refundStatus,
+                 orderNo,
+                 paymentNo,
+                 refundAmount](const size_t) {
                     if (done)
                     {
                         done(refundStatus);
+                    }
+                    if (refundStatus == "REFUND_SUCCESS")
+                    {
+                        drogon::orm::Mapper<PayOrderModel> orderMapper(
+                            dbClient_);
+                        auto orderCriteria =
+                            drogon::orm::Criteria(
+                                PayOrderModel::Cols::_order_no,
+                                drogon::orm::CompareOperator::EQ,
+                                orderNo);
+                        orderMapper.findOne(
+                            orderCriteria,
+                            [this, orderNo, paymentNo, refundAmount](
+                                const PayOrderModel &order) {
+                                insertLedgerEntry(
+                                    dbClient_,
+                                    order.getValueOfUserId(),
+                                    orderNo,
+                                    paymentNo,
+                                    "REFUND",
+                                    refundAmount);
+                            },
+                            [](const drogon::orm::DrogonDbException &e) {
+                                LOG_ERROR
+                                    << "Refund ledger order lookup error: "
+                                    << e.base().what();
+                            });
                     }
                 },
                 [](const drogon::orm::DrogonDbException &e) {
@@ -1461,6 +1535,12 @@ void PayPlugin::handleWechatCallback(
                                                          callbackPtr,
                                                          paymentNo,
                                                          orderStatus](PayOrderModel order) {
+                                                            const auto userId =
+                                                                order.getValueOfUserId();
+                                                            const auto orderAmount =
+                                                                order.getValueOfAmount();
+                                                            const auto orderNo =
+                                                                order.getValueOfOrderNo();
                                                             order.setStatus(
                                                                 orderStatus);
                                                             order.setUpdatedAt(
@@ -1473,7 +1553,22 @@ void PayPlugin::handleWechatCallback(
                                                                 order,
                                                                 [this,
                                                                  callbackPtr,
-                                                                 paymentNo](const size_t) {
+                                                                 paymentNo,
+                                                                 orderStatus,
+                                                                 userId,
+                                                                 orderAmount,
+                                                                 orderNo](const size_t) {
+                                                                    if (orderStatus ==
+                                                                        "PAID")
+                                                                    {
+                                                                        insertLedgerEntry(
+                                                                            dbClient_,
+                                                                            userId,
+                                                                            orderNo,
+                                                                            paymentNo,
+                                                                            "PAYMENT",
+                                                                            orderAmount);
+                                                                    }
                                                                     drogon::orm::
                                                                         Mapper<
                                                                             PayCallbackModel>
