@@ -393,6 +393,15 @@ void PayPlugin::createPayment(
         return;
     }
 
+    if (!wechatClient_)
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k501NotImplemented);
+        resp->setBody("wechat client not ready");
+        callback(resp);
+        return;
+    }
+
     auto json = req->getJsonObject();
     if (!json)
     {
@@ -420,6 +429,16 @@ void PayPlugin::createPayment(
     std::string currency = (*json).get("currency", "CNY").asString();
     std::string orderNo = drogon::utils::getUuid();
     std::string paymentNo = drogon::utils::getUuid();
+
+    int64_t totalFen = 0;
+    if (!parseAmountToFen(amount, totalFen))
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k400BadRequest);
+        resp->setBody("invalid amount format");
+        callback(resp);
+        return;
+    }
 
     int64_t userIdValue = 0;
     try
@@ -451,9 +470,22 @@ void PayPlugin::createPayment(
     order.setCreatedAt(trantor::Date::now());
     order.setUpdatedAt(trantor::Date::now());
 
+    Json::Value payload;
+    payload["description"] = title;
+    payload["out_trade_no"] = orderNo;
+    payload["amount"]["total"] = static_cast<Json::Int64>(totalFen);
+    payload["amount"]["currency"] = currency;
+    const std::string requestPayload = toJsonString(payload);
+
     orderMapper.insert(
         order,
-        [this, callbackPtr, orderNo, paymentNo, amount, currency, title](
+        [this,
+         callbackPtr,
+         orderNo,
+         paymentNo,
+         amount,
+         payload,
+         requestPayload](
             const PayOrderModel &) {
             drogon::orm::Mapper<PayPaymentModel> paymentMapper(dbClient_);
             PayPaymentModel payment;
@@ -461,39 +493,18 @@ void PayPlugin::createPayment(
             payment.setPaymentNo(paymentNo);
             payment.setStatus("INIT");
             payment.setAmount(amount);
+            payment.setRequestPayload(requestPayload);
             payment.setCreatedAt(trantor::Date::now());
             payment.setUpdatedAt(trantor::Date::now());
 
             paymentMapper.insert(
                 payment,
-                [this, callbackPtr, orderNo, paymentNo, amount, currency, title](
+                [this,
+                 callbackPtr,
+                 orderNo,
+                 paymentNo,
+                 payload](
                     const PayPaymentModel &) {
-                    if (!wechatClient_)
-                    {
-                        auto resp = drogon::HttpResponse::newHttpResponse();
-                        resp->setStatusCode(drogon::k501NotImplemented);
-                        resp->setBody("wechat client not ready");
-                        (*callbackPtr)(resp);
-                        return;
-                    }
-
-                    int64_t totalFen = 0;
-                    if (!parseAmountToFen(amount, totalFen))
-                    {
-                        auto resp = drogon::HttpResponse::newHttpResponse();
-                        resp->setStatusCode(drogon::k400BadRequest);
-                        resp->setBody("invalid amount format");
-                        (*callbackPtr)(resp);
-                        return;
-                    }
-
-                    Json::Value payload;
-                    payload["description"] = title;
-                    payload["out_trade_no"] = orderNo;
-                    payload["amount"]["total"] =
-                        static_cast<Json::Int64>(totalFen);
-                    payload["amount"]["currency"] = currency;
-
                     wechatClient_->createTransactionNative(
                         payload,
                         [this, callbackPtr, orderNo, paymentNo](
@@ -501,11 +512,63 @@ void PayPlugin::createPayment(
                             const std::string &error) {
                             if (!error.empty())
                             {
+                                Json::Value errJson;
+                                errJson["error"] = error;
+                                const std::string errPayload =
+                                    toJsonString(errJson);
                                 auto resp =
                                     drogon::HttpResponse::newHttpResponse();
                                 resp->setStatusCode(
                                     drogon::k502BadGateway);
                                 resp->setBody("wechat error: " + error);
+                                drogon::orm::Mapper<PayPaymentModel>
+                                    paymentMapper(dbClient_);
+                                auto payCriteria = drogon::orm::Criteria(
+                                    PayPaymentModel::Cols::_payment_no,
+                                    drogon::orm::CompareOperator::EQ,
+                                    paymentNo);
+                                paymentMapper.findOne(
+                                    payCriteria,
+                                    [this, errPayload, orderNo](PayPaymentModel payment) {
+                                        payment.setStatus("FAIL");
+                                        payment.setResponsePayload(errPayload);
+                                        payment.setUpdatedAt(
+                                            trantor::Date::now());
+                                        drogon::orm::Mapper<PayPaymentModel>
+                                            paymentUpdater(dbClient_);
+                                        paymentUpdater.update(
+                                            payment,
+                                            [this, orderNo](const size_t) {
+                                                drogon::orm::Mapper<PayOrderModel>
+                                                    orderMapper(dbClient_);
+                                                auto orderCriteria =
+                                                    drogon::orm::Criteria(
+                                                        PayOrderModel::Cols::
+                                                            _order_no,
+                                                        drogon::orm::
+                                                            CompareOperator::EQ,
+                                                        orderNo);
+                                                orderMapper.findOne(
+                                                    orderCriteria,
+                                                    [this](PayOrderModel order) {
+                                                        order.setStatus(
+                                                            "FAILED");
+                                                        order.setUpdatedAt(
+                                                            trantor::Date::now());
+                                                        drogon::orm::Mapper<
+                                                            PayOrderModel>
+                                                            orderUpdater(
+                                                                dbClient_);
+                                                        orderUpdater.update(
+                                                            order,
+                                                            [](const size_t) {},
+                                                            [](const drogon::orm::DrogonDbException &) {});
+                                                    },
+                                                    [](const drogon::orm::DrogonDbException &) {});
+                                            },
+                                            [](const drogon::orm::DrogonDbException &) {});
+                                    },
+                                    [](const drogon::orm::DrogonDbException &) {});
                                 (*callbackPtr)(resp);
                                 return;
                             }
@@ -872,16 +935,16 @@ void PayPlugin::refund(
                                 PayRefundModel::Cols::_refund_no,
                                 drogon::orm::CompareOperator::EQ,
                                 refundNo);
-                            refundMapper.findOne(
-                                refundCriteria,
-                                [this, callbackPtr, refundNo, orderNo, refundStatus,
+                                refundMapper.findOne(
+                                    refundCriteria,
+                                    [this, callbackPtr, refundNo, orderNo, refundStatus,
                                  result, refundId](
-                                    PayRefundModel refund) {
-                                    refund.setStatus(refundStatus);
-                                    refund.setChannelRefundNo(refundId);
-                                    refund.setUpdatedAt(trantor::Date::now());
-                                    drogon::orm::Mapper<PayRefundModel>
-                                        refundUpdater(dbClient_);
+                                        PayRefundModel refund) {
+                                        refund.setStatus(refundStatus);
+                                        refund.setChannelRefundNo(refundId);
+                                        refund.setUpdatedAt(trantor::Date::now());
+                                        drogon::orm::Mapper<PayRefundModel>
+                                            refundUpdater(dbClient_);
                                     refundUpdater.update(
                                         refund,
                                         [callbackPtr, refundNo, orderNo,
