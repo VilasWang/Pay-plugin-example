@@ -5,6 +5,7 @@
 #include <drogon/utils/Utilities.h>
 #include "../models/PayCallback.h"
 #include "../models/PayIdempotency.h"
+#include "../models/PayLedger.h"
 #include "../models/PayOrder.h"
 #include "../models/PayPayment.h"
 #include "../models/PayRefund.h"
@@ -454,6 +455,62 @@ DROGON_TEST(PayOrder_OrmRoundTrip)
     CHECK(fetched.getValueOfStatus() == "CREATED");
     CHECK(fetched.getValueOfChannel() == "WECHAT");
     CHECK(fetched.getValueOfTitle() == "Test Order");
+
+    mapper.deleteByPrimaryKey(id);
+}
+
+DROGON_TEST(PayLedger_OrmRoundTrip)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_ledger ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "user_id BIGINT NOT NULL,"
+        "order_no VARCHAR(64) NOT NULL,"
+        "payment_no VARCHAR(64),"
+        "entry_type VARCHAR(24) NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "balance DECIMAL(18,2),"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    using PayLedger = drogon_model::pay_test::PayLedger;
+    drogon::orm::Mapper<PayLedger> mapper(client);
+
+    const int64_t userId = 67890;
+    const auto orderNo = "order_" + drogon::utils::getUuid();
+    const auto paymentNo = "pay_" + drogon::utils::getUuid();
+
+    PayLedger row;
+    row.setUserId(userId);
+    row.setOrderNo(orderNo);
+    row.setPaymentNo(paymentNo);
+    row.setEntryType("DEBIT");
+    row.setAmount("3.21");
+    row.setBalance("100.00");
+
+    mapper.insert(row);
+    const auto id = row.getValueOfId();
+    CHECK(id > 0);
+
+    const auto fetched = mapper.findByPrimaryKey(id);
+    CHECK(fetched.getValueOfUserId() == userId);
+    CHECK(fetched.getValueOfOrderNo() == orderNo);
+    CHECK(fetched.getValueOfPaymentNo() == paymentNo);
+    CHECK(fetched.getValueOfEntryType() == "DEBIT");
+    CHECK(fetched.getValueOfAmount() == "3.21");
+    CHECK(fetched.getValueOfBalance() == "100.00");
 
     mapper.deleteByPrimaryKey(id);
 }

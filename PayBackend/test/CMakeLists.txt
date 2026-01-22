@@ -24,6 +24,7 @@ add_executable(
     ../filters/PayAuthMetrics.cc
     ../models/PayCallback.cc
     ../models/PayIdempotency.cc
+    ../models/PayLedger.cc
     ../models/PayOrder.cc
     ../models/PayPayment.cc
     ../models/PayRefund.cc
