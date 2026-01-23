@@ -169,6 +169,18 @@ void PayPlugin::shutdown()
     }
 }
 
+void PayPlugin::setTestClients(
+    const std::shared_ptr<WechatPayClient> &wechatClient,
+    const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+    const drogon::nosql::RedisClientPtr &redisClient,
+    bool useRedisIdempotency)
+{
+    wechatClient_ = wechatClient;
+    dbClient_ = dbClient;
+    redisClient_ = redisClient;
+    useRedisIdempotency_ = useRedisIdempotency;
+}
+
 void PayPlugin::startReconcileTimer()
 {
     if (!reconcileEnabled_)

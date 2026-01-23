@@ -245,7 +245,7 @@ DROGON_TEST(PayCallback_OrmRoundTrip)
         "id BIGSERIAL PRIMARY KEY,"
         "payment_no VARCHAR(64) NOT NULL,"
         "raw_body TEXT NOT NULL,"
-        "signature VARCHAR(256),"
+        "signature VARCHAR(512),"
         "serial_no VARCHAR(64),"
         "verified BOOLEAN NOT NULL DEFAULT FALSE,"
         "processed BOOLEAN NOT NULL DEFAULT FALSE,"

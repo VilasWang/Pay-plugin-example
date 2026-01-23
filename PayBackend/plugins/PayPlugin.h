@@ -38,6 +38,12 @@ class PayPlugin : public drogon::Plugin<PayPlugin>
         const drogon::HttpRequestPtr &req,
         std::function<void(const drogon::HttpResponsePtr &)> &&callback);
 
+    void setTestClients(
+        const std::shared_ptr<WechatPayClient> &wechatClient,
+        const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+        const drogon::nosql::RedisClientPtr &redisClient = nullptr,
+        bool useRedisIdempotency = false);
+
   private:
     void startReconcileTimer();
     void syncOrderStatusFromWechat(

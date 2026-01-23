@@ -16,6 +16,7 @@ set(TEST_SRC
     PayAuthMetricsTest.cc
     PayUtilsTest.cc
     WechatPayClientTest.cc
+    WechatCallbackIntegrationTest.cc
 )
 
 add_executable(
@@ -31,6 +32,7 @@ add_executable(
     ../models/PayRefund.cc
     ../controllers/MetricsController.cc
     ../controllers/PayMetricsController.cc
+    ../plugins/PayPlugin.cc
     ../plugins/WechatPayClient.cc
     ../utils/PayUtils.cc
 )
