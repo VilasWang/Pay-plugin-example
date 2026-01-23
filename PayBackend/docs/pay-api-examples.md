@@ -4,6 +4,7 @@
 
 ```
 curl -X POST http://localhost:5566/pay/create \
+  -H "Idempotency-Key: YOUR_IDEMPOTENCY_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "10001",
@@ -19,9 +20,14 @@ Response (sample):
 {
   "order_no": "c2d7c8ad-6a4b-4f3f-9a31-32db0a3fcd82",
   "payment_no": "9abbb3e5-7b23-4a0f-a62d-4d534c2be9c0",
-  "status": "CREATED"
+  "status": "PAYING",
+  "wechat_response": {
+    "code_url": "weixin://wxpay/bizpayurl?pr=xxxx"
+  }
 }
 ```
+
+Note: `Idempotency-Key` is optional but recommended for retry safety.
 
 ## Query Order
 
@@ -34,6 +40,7 @@ curl "http://localhost:5566/pay/query?order_no=c2d7c8ad-6a4b-4f3f-9a31-32db0a3fc
 
 ```
 curl -X POST http://localhost:5566/pay/refund \
+  -H "Idempotency-Key: YOUR_IDEMPOTENCY_KEY" \
   -H "X-Api-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
