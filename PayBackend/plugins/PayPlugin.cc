@@ -875,6 +875,25 @@ void PayPlugin::proceedRefund(
                             drogon::HttpResponse::newHttpResponse();
                         resp->setStatusCode(drogon::k501NotImplemented);
                         resp->setBody("wechat client not ready");
+                        drogon::orm::Mapper<PayRefundModel> refundMapper(
+                            dbClient_);
+                        auto refundCriteria = drogon::orm::Criteria(
+                            PayRefundModel::Cols::_refund_no,
+                            drogon::orm::CompareOperator::EQ,
+                            refundNo);
+                        refundMapper.findOne(
+                            refundCriteria,
+                            [this](PayRefundModel refund) {
+                                refund.setStatus("REFUND_FAIL");
+                                refund.setUpdatedAt(trantor::Date::now());
+                                drogon::orm::Mapper<PayRefundModel>
+                                    refundUpdater(dbClient_);
+                                refundUpdater.update(
+                                    refund,
+                                    [](const size_t) {},
+                                    [](const drogon::orm::DrogonDbException &) {});
+                            },
+                            [](const drogon::orm::DrogonDbException &) {});
                         (*callbackPtr)(resp);
                         return;
                     }
@@ -905,6 +924,25 @@ void PayPlugin::proceedRefund(
                                 resp->setStatusCode(
                                     drogon::k502BadGateway);
                                 resp->setBody("wechat error: " + error);
+                                drogon::orm::Mapper<PayRefundModel> refundMapper(
+                                    dbClient_);
+                                auto refundCriteria = drogon::orm::Criteria(
+                                    PayRefundModel::Cols::_refund_no,
+                                    drogon::orm::CompareOperator::EQ,
+                                    refundNo);
+                                refundMapper.findOne(
+                                    refundCriteria,
+                                    [this](PayRefundModel refund) {
+                                        refund.setStatus("REFUND_FAIL");
+                                        refund.setUpdatedAt(trantor::Date::now());
+                                        drogon::orm::Mapper<PayRefundModel>
+                                            refundUpdater(dbClient_);
+                                        refundUpdater.update(
+                                            refund,
+                                            [](const size_t) {},
+                                            [](const drogon::orm::DrogonDbException &) {});
+                                    },
+                                    [](const drogon::orm::DrogonDbException &) {});
                                 (*callbackPtr)(resp);
                                 return;
                             }
