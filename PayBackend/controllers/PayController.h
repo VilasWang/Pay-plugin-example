@@ -25,6 +25,11 @@ class PayController : public drogon::HttpController<PayController>
                   Get,
                   Options,
                   "PayAuthFilter");
+    ADD_METHOD_TO(PayController::reconcileSummary,
+                  "/pay/reconcile/summary",
+                  Get,
+                  Options,
+                  "PayAuthFilter");
     METHOD_LIST_END
 
     void createPayment(const HttpRequestPtr &req,
@@ -38,4 +43,8 @@ class PayController : public drogon::HttpController<PayController>
 
     void queryRefund(const HttpRequestPtr &req,
                      std::function<void(const HttpResponsePtr &)> &&callback);
+
+    void reconcileSummary(
+        const HttpRequestPtr &req,
+        std::function<void(const HttpResponsePtr &)> &&callback);
 };

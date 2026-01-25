@@ -10,6 +10,7 @@
 #include <drogon/orm/Criteria.h>
 #include <drogon/orm/Mapper.h>
 #include <drogon/utils/Utilities.h>
+#include <atomic>
 #include <memory>
 #include <trantor/utils/Date.h>
 
@@ -1600,6 +1601,101 @@ void PayPlugin::queryRefund(
             resp->setBody(std::string("refund not found: ") + e.base().what());
             (*callbackPtr)(resp);
         });
+}
+
+void PayPlugin::reconcileSummary(
+    const drogon::HttpRequestPtr &,
+    std::function<void(const drogon::HttpResponsePtr &)> &&callback)
+{
+    if (!dbClient_)
+    {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k500InternalServerError);
+        resp->setBody("db client not ready");
+        callback(resp);
+        return;
+    }
+
+    auto callbackPtr =
+        std::make_shared<std::function<void(const drogon::HttpResponsePtr &)>>(
+            std::move(callback));
+    auto responded = std::make_shared<std::atomic<bool>>(false);
+    auto pending = std::make_shared<std::atomic<int>>(2);
+    auto summary = std::make_shared<Json::Value>();
+    (*summary)["paying_orders"] = 0;
+    (*summary)["refunding_refunds"] = 0;
+    (*summary)["oldest_paying_updated"] = "";
+    (*summary)["oldest_refund_updated"] = "";
+
+    auto finishIfReady = [callbackPtr, responded, pending, summary]() {
+        if (pending->fetch_sub(1) != 1)
+        {
+            return;
+        }
+        if (responded->exchange(true))
+        {
+            return;
+        }
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(*summary);
+        (*callbackPtr)(resp);
+    };
+
+    dbClient_->execSqlAsync(
+        "SELECT COUNT(*) AS cnt, MIN(updated_at) AS oldest_updated "
+        "FROM pay_order WHERE status = $1",
+        [summary, finishIfReady](const drogon::orm::Result &r) {
+            if (!r.empty())
+            {
+                const auto &row = r.front();
+                (*summary)["paying_orders"] = row["cnt"].as<int64_t>();
+                if (!row["oldest_updated"].isNull())
+                {
+                    (*summary)["oldest_paying_updated"] =
+                        row["oldest_updated"].as<std::string>();
+                }
+            }
+            finishIfReady();
+        },
+        [callbackPtr, responded](const drogon::orm::DrogonDbException &e) {
+            if (responded->exchange(true))
+            {
+                return;
+            }
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(std::string("db error: ") + e.base().what());
+            (*callbackPtr)(resp);
+        },
+        "PAYING");
+
+    dbClient_->execSqlAsync(
+        "SELECT COUNT(*) AS cnt, MIN(updated_at) AS oldest_updated "
+        "FROM pay_refund WHERE status IN ($1, $2)",
+        [summary, finishIfReady](const drogon::orm::Result &r) {
+            if (!r.empty())
+            {
+                const auto &row = r.front();
+                (*summary)["refunding_refunds"] = row["cnt"].as<int64_t>();
+                if (!row["oldest_updated"].isNull())
+                {
+                    (*summary)["oldest_refund_updated"] =
+                        row["oldest_updated"].as<std::string>();
+                }
+            }
+            finishIfReady();
+        },
+        [callbackPtr, responded](const drogon::orm::DrogonDbException &e) {
+            if (responded->exchange(true))
+            {
+                return;
+            }
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k500InternalServerError);
+            resp->setBody(std::string("db error: ") + e.base().what());
+            (*callbackPtr)(resp);
+        },
+        "REFUND_INIT",
+        "REFUNDING");
 }
 
 void PayPlugin::handleWechatCallback(

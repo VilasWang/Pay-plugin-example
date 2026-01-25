@@ -18,6 +18,7 @@ set(TEST_SRC
     WechatPayClientTest.cc
     WechatCallbackIntegrationTest.cc
     RefundQueryTest.cc
+    ReconcileSummaryTest.cc
 )
 
 add_executable(

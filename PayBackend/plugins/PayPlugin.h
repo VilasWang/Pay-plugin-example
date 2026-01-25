@@ -34,6 +34,10 @@ class PayPlugin : public drogon::Plugin<PayPlugin>
         const drogon::HttpRequestPtr &req,
         std::function<void(const drogon::HttpResponsePtr &)> &&callback);
 
+    void reconcileSummary(
+        const drogon::HttpRequestPtr &req,
+        std::function<void(const drogon::HttpResponsePtr &)> &&callback);
+
     void handleWechatCallback(
         const drogon::HttpRequestPtr &req,
         std::function<void(const drogon::HttpResponsePtr &)> &&callback);
