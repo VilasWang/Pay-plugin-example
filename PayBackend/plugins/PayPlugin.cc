@@ -424,6 +424,16 @@ void PayPlugin::syncRefundStatusFromWechat(
              << " wechat_status=" << wechatStatus
              << " refund_status=" << refundStatus;
 
+    if (refundStatus.empty())
+    {
+        LOG_WARN << "Unknown refund status from WeChat: " << wechatStatus;
+        if (done)
+        {
+            done("");
+        }
+        return;
+    }
+
     if (!dbClient_)
     {
         if (done)

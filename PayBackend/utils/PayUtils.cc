@@ -136,6 +136,10 @@ std::string mapRefundStatus(const std::string &wechatStatus)
     {
         return "REFUND_FAIL";
     }
-    return "REFUNDING";
+    if (wechatStatus == "PROCESSING")
+    {
+        return "REFUNDING";
+    }
+    return "";
 }
 }  // namespace pay::utils

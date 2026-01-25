@@ -75,6 +75,7 @@ DROGON_TEST(PayUtils_MapRefundStatus)
     CHECK(pay::utils::mapRefundStatus("CLOSED") == "REFUND_FAIL");
     CHECK(pay::utils::mapRefundStatus("ABNORMAL") == "REFUND_FAIL");
     CHECK(pay::utils::mapRefundStatus("PROCESSING") == "REFUNDING");
+    CHECK(pay::utils::mapRefundStatus("UNKNOWN") == "");
 }
 
 DROGON_TEST(PayUtils_ToJsonString)
