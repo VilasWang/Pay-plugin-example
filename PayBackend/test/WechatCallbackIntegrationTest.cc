@@ -325,6 +325,58 @@ DROGON_TEST(PayPlugin_WechatCallback_WechatClientNotReady)
     CHECK((*json)["message"].asString() == "wechat client not ready");
 }
 
+DROGON_TEST(PayPlugin_WechatCallback_DbClientNotReady)
+{
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto certPath =
+        tempDir / ("wechatpay_cb_" + drogon::utils::getUuid() + ".pem");
+    {
+        std::ofstream out(certPath.string(), std::ios::binary);
+        out << certPem;
+    }
+
+    const std::string apiV3Key = "0123456789abcdef0123456789abcdef";
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = apiV3Key;
+    wechatConfig["platform_cert_path"] = certPath.string();
+    wechatConfig["serial_no"] = "SERIAL_TEST";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "mch_123";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, nullptr);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setBody("{}");
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.handleWechatCallback(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k500InternalServerError);
+    const auto json = resp->getJsonObject();
+    CHECK(json != nullptr);
+    CHECK((*json)["message"].asString() == "db client not ready");
+
+    EVP_PKEY_free(pkey);
+    std::error_code ec;
+    std::filesystem::remove(certPath, ec);
+}
+
 DROGON_TEST(PayPlugin_WechatCallback_EndToEnd)
 {
     Json::Value root;
