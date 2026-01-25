@@ -299,6 +299,32 @@ bool signMessage(const std::string &message,
 }
 }  // namespace
 
+DROGON_TEST(PayPlugin_WechatCallback_WechatClientNotReady)
+{
+    PayPlugin plugin;
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setBody("{}");
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.handleWechatCallback(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k500InternalServerError);
+    const auto json = resp->getJsonObject();
+    CHECK(json != nullptr);
+    CHECK((*json)["message"].asString() == "wechat client not ready");
+}
+
 DROGON_TEST(PayPlugin_WechatCallback_EndToEnd)
 {
     Json::Value root;
