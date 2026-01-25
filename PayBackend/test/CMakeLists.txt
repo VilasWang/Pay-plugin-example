@@ -9,6 +9,7 @@ find_package(Drogon CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 set(TEST_SRC
+    CreatePaymentIntegrationTest.cc
     ControllerMetricsTest.cc
     IdempotencyIntegrationTest.cc
     test_main.cc
