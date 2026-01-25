@@ -1697,21 +1697,10 @@ void PayPlugin::handleWechatCallback(
         return;
     }
 
-    const std::string orderNo =
-        plainJson.get("out_trade_no", "").asString();
-    const std::string transactionId =
-        plainJson.get("transaction_id", "").asString();
-    const std::string tradeState =
-        plainJson.get("trade_state", "").asString();
     const std::string appId =
         plainJson.get("appid", "").asString();
     const std::string mchId =
         plainJson.get("mchid", "").asString();
-    if (orderNo.empty() || tradeState.empty())
-    {
-        respond(drogon::k400BadRequest, "missing out_trade_no/trade_state");
-        return;
-    }
     if (!appId.empty() && wechatClient_ &&
         appId != wechatClient_->getAppId())
     {
@@ -1722,6 +1711,318 @@ void PayPlugin::handleWechatCallback(
         mchId != wechatClient_->getMchId())
     {
         respond(drogon::k400BadRequest, "mchid mismatch");
+        return;
+    }
+
+    const std::string refundNo =
+        plainJson.get("out_refund_no", "").asString();
+    const std::string refundStatusRaw =
+        plainJson.get("refund_status", "").asString();
+    const std::string refundId =
+        plainJson.get("refund_id", "").asString();
+    const bool isRefundCallback =
+        !refundNo.empty() || !refundStatusRaw.empty();
+
+    if (isRefundCallback)
+    {
+        if (refundNo.empty() || refundStatusRaw.empty())
+        {
+            respond(drogon::k400BadRequest,
+                    "missing refund_no/refund_status");
+            return;
+        }
+
+        std::string idempotencyKey = notifyJson.get("id", "").asString();
+        if (idempotencyKey.empty())
+        {
+            idempotencyKey = refundNo + ":" + refundStatusRaw;
+        }
+
+        auto callbackPtr =
+            std::make_shared<std::function<void(const drogon::HttpResponsePtr &)>>(
+                std::move(callback));
+
+        auto proceedRefundDb = [this,
+                                callbackPtr,
+                                idempotencyKey,
+                                refundNo,
+                                refundStatusRaw,
+                                refundId,
+                                plaintext,
+                                body,
+                                plainJson]() {
+            drogon::orm::Mapper<PayIdempotencyModel> idempMapper(dbClient_);
+            auto idempCriteria =
+                drogon::orm::Criteria(PayIdempotencyModel::Cols::_idempotency_key,
+                                      drogon::orm::CompareOperator::EQ,
+                                      idempotencyKey);
+            idempMapper.findOne(
+                idempCriteria,
+                [callbackPtr](const PayIdempotencyModel &) {
+                    Json::Value ok;
+                    ok["code"] = "SUCCESS";
+                    ok["message"] = "OK";
+                    auto resp = drogon::HttpResponse::newHttpJsonResponse(ok);
+                    (*callbackPtr)(resp);
+                },
+                [this,
+                 callbackPtr,
+                 idempotencyKey,
+                 refundNo,
+                 refundStatusRaw,
+                 refundId,
+                 plaintext,
+                 body,
+                 plainJson](const drogon::orm::DrogonDbException &) {
+                    const std::string requestHash =
+                        drogon::utils::getSha256(body);
+                    PayIdempotencyModel idemp;
+                    idemp.setIdempotencyKey(idempotencyKey);
+                    idemp.setRequestHash(requestHash);
+                    idemp.setResponseSnapshot(plaintext);
+                    const auto now = trantor::Date::now();
+                    const auto expiresAt = trantor::Date(
+                        now.microSecondsSinceEpoch() +
+                        static_cast<int64_t>(7) * 24 * 60 * 60 * 1000000);
+                    idemp.setExpiresAt(expiresAt);
+
+                    drogon::orm::Mapper<PayIdempotencyModel> idempInsert(dbClient_);
+                    idempInsert.insert(
+                        idemp,
+                        [this,
+                         callbackPtr,
+                         refundNo,
+                         refundStatusRaw,
+                         refundId,
+                         plaintext,
+                         plainJson](const PayIdempotencyModel &) {
+                            const std::string refundStatus =
+                                mapRefundStatus(refundStatusRaw);
+                            if (refundStatus.empty())
+                            {
+                                auto resp =
+                                    drogon::HttpResponse::newHttpResponse();
+                                resp->setStatusCode(drogon::k400BadRequest);
+                                resp->setBody("invalid refund status");
+                                (*callbackPtr)(resp);
+                                return;
+                            }
+
+                            drogon::orm::Mapper<PayRefundModel> refundMapper(
+                                dbClient_);
+                            auto refundCriteria =
+                                drogon::orm::Criteria(
+                                    PayRefundModel::Cols::_refund_no,
+                                    drogon::orm::CompareOperator::EQ,
+                                    refundNo);
+                            refundMapper.findOne(
+                                refundCriteria,
+                                [this,
+                                 callbackPtr,
+                                 refundStatus,
+                                 refundId,
+                                 plaintext,
+                                 plainJson](PayRefundModel refund) {
+                                    if (refund.getValueOfStatus() ==
+                                        "REFUND_SUCCESS")
+                                    {
+                                        Json::Value ok;
+                                        ok["code"] = "SUCCESS";
+                                        ok["message"] = "OK";
+                                        auto resp =
+                                            drogon::HttpResponse::newHttpJsonResponse(
+                                                ok);
+                                        (*callbackPtr)(resp);
+                                        return;
+                                    }
+
+                                    const auto orderNo =
+                                        refund.getValueOfOrderNo();
+                                    const auto paymentNo =
+                                        refund.getValueOfPaymentNo();
+                                    const auto refundAmount =
+                                        refund.getValueOfAmount();
+                                    const auto &amountJson = plainJson["amount"];
+                                    const std::string notifyCurrency =
+                                        amountJson.get("currency", "").asString();
+                                    const int64_t notifyRefundFen =
+                                        amountJson.get("refund", 0).asInt64();
+                                    int64_t refundTotalFen = 0;
+                                    if (!parseAmountToFen(refundAmount,
+                                                          refundTotalFen) ||
+                                        notifyRefundFen <= 0)
+                                    {
+                                        auto resp =
+                                            drogon::HttpResponse::newHttpResponse();
+                                        resp->setStatusCode(
+                                            drogon::k400BadRequest);
+                                        resp->setBody(
+                                            "invalid refund amount in callback");
+                                        (*callbackPtr)(resp);
+                                        return;
+                                    }
+                                    if (notifyRefundFen != refundTotalFen)
+                                    {
+                                        auto resp =
+                                            drogon::HttpResponse::newHttpResponse();
+                                        resp->setStatusCode(
+                                            drogon::k400BadRequest);
+                                        resp->setBody("refund amount mismatch");
+                                        (*callbackPtr)(resp);
+                                        return;
+                                    }
+
+                                    drogon::orm::Mapper<PayOrderModel> orderMapper(
+                                        dbClient_);
+                                    auto orderCriteria =
+                                        drogon::orm::Criteria(
+                                            PayOrderModel::Cols::_order_no,
+                                            drogon::orm::CompareOperator::EQ,
+                                            orderNo);
+                                    orderMapper.findOne(
+                                        orderCriteria,
+                                        [this,
+                                         callbackPtr,
+                                         refundStatus,
+                                         refundId,
+                                         refundAmount,
+                                         orderNo,
+                                         paymentNo,
+                                         notifyCurrency,
+                                         plaintext,
+                                         refund](const PayOrderModel &order) mutable {
+                                            const std::string orderCurrency =
+                                                order.getValueOfCurrency();
+                                            if (!notifyCurrency.empty() &&
+                                                notifyCurrency != orderCurrency)
+                                            {
+                                                auto resp =
+                                                    drogon::HttpResponse::newHttpResponse();
+                                                resp->setStatusCode(
+                                                    drogon::k400BadRequest);
+                                                resp->setBody(
+                                                    "refund currency mismatch");
+                                                (*callbackPtr)(resp);
+                                                return;
+                                            }
+
+                                            refund.setStatus(refundStatus);
+                                            refund.setChannelRefundNo(refundId);
+                                            refund.setUpdatedAt(trantor::Date::now());
+
+                                            drogon::orm::Mapper<PayRefundModel>
+                                                refundUpdater(dbClient_);
+                                            refundUpdater.update(
+                                                refund,
+                                                [this,
+                                                 callbackPtr,
+                                                 refundStatus,
+                                                 refundAmount,
+                                                 orderNo,
+                                                 paymentNo,
+                                                 order](const size_t) {
+                                                    if (refundStatus ==
+                                                        "REFUND_SUCCESS")
+                                                    {
+                                                        insertLedgerEntry(
+                                                            dbClient_,
+                                                            order.getValueOfUserId(),
+                                                            orderNo,
+                                                            paymentNo,
+                                                            "REFUND",
+                                                            refundAmount);
+                                                    }
+                                                    Json::Value ok;
+                                                    ok["code"] = "SUCCESS";
+                                                    ok["message"] = "OK";
+                                                    auto resp =
+                                                        drogon::HttpResponse::
+                                                            newHttpJsonResponse(ok);
+                                                    (*callbackPtr)(resp);
+                                                },
+                                                [callbackPtr](
+                                                    const drogon::orm::DrogonDbException &e) {
+                                                    auto resp =
+                                                        drogon::HttpResponse::
+                                                            newHttpResponse();
+                                                    resp->setStatusCode(
+                                                        drogon::k500InternalServerError);
+                                                    resp->setBody(
+                                                        std::string("db error: ") +
+                                                        e.base().what());
+                                                    (*callbackPtr)(resp);
+                                                });
+                                        },
+                                        [callbackPtr](const drogon::orm::DrogonDbException &e) {
+                                            auto resp =
+                                                drogon::HttpResponse::newHttpResponse();
+                                            resp->setStatusCode(
+                                                drogon::k404NotFound);
+                                            resp->setBody(
+                                                std::string("order not found: ") +
+                                                e.base().what());
+                                            (*callbackPtr)(resp);
+                                        });
+                                },
+                                [callbackPtr](const drogon::orm::DrogonDbException &e) {
+                                    auto resp =
+                                        drogon::HttpResponse::newHttpResponse();
+                                    resp->setStatusCode(drogon::k404NotFound);
+                                    resp->setBody(
+                                        std::string("refund not found: ") +
+                                        e.base().what());
+                                    (*callbackPtr)(resp);
+                                });
+                        },
+                        [callbackPtr](const drogon::orm::DrogonDbException &e) {
+                            auto resp = drogon::HttpResponse::newHttpResponse();
+                            resp->setStatusCode(drogon::k500InternalServerError);
+                            resp->setBody(std::string("db error: ") +
+                                          e.base().what());
+                            (*callbackPtr)(resp);
+                        });
+                });
+        };
+
+        if (useRedisIdempotency_ && redisClient_)
+        {
+            std::string redisKey = "pay:callback:" + idempotencyKey;
+            redisClient_->execCommandAsync(
+                [callbackPtr, proceedRefundDb](const drogon::nosql::RedisResult &result) {
+                    if (result.type() == drogon::nosql::RedisResultType::kNil)
+                    {
+                        Json::Value ok;
+                        ok["code"] = "SUCCESS";
+                        ok["message"] = "OK";
+                        auto resp = drogon::HttpResponse::newHttpJsonResponse(ok);
+                        (*callbackPtr)(resp);
+                        return;
+                    }
+                    proceedRefundDb();
+                },
+                [callbackPtr, proceedRefundDb](const drogon::nosql::RedisException &) {
+                    proceedRefundDb();
+                },
+                "SET %s %s NX EX %d",
+                redisKey.c_str(),
+                "1",
+                static_cast<int>(idempotencyTtlSeconds_));
+            return;
+        }
+
+        proceedRefundDb();
+        return;
+    }
+
+    const std::string orderNo =
+        plainJson.get("out_trade_no", "").asString();
+    const std::string transactionId =
+        plainJson.get("transaction_id", "").asString();
+    const std::string tradeState =
+        plainJson.get("trade_state", "").asString();
+    if (orderNo.empty() || tradeState.empty())
+    {
+        respond(drogon::k400BadRequest, "missing out_trade_no/trade_state");
         return;
     }
 
