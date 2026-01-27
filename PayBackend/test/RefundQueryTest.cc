@@ -1,6 +1,11 @@
+#include <drogon/drogon.h>
 #include <drogon/drogon_test.h>
 #include <drogon/nosql/RedisClient.h>
 #include <drogon/utils/Utilities.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include "../models/PayOrder.h"
 #include "../models/PayRefund.h"
 #include "../plugins/PayPlugin.h"
 #include "../utils/PayUtils.h"
@@ -8,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <thread>
 
 namespace
 {
@@ -77,6 +83,84 @@ drogon::nosql::RedisClientPtr buildRedisClient(const Json::Value &redis)
     trantor::InetAddress addr(host, static_cast<uint16_t>(port));
     return drogon::nosql::RedisClient::newRedisClient(
         addr, 1, password, db, username);
+}
+
+bool writeTempPrivateKey(const std::filesystem::path &path)
+{
+    EVP_PKEY *pkey = EVP_PKEY_new();
+    if (!pkey)
+    {
+        return false;
+    }
+
+    RSA *rsa = RSA_new();
+    BIGNUM *bn = BN_new();
+    if (!rsa || !bn)
+    {
+        if (bn)
+        {
+            BN_free(bn);
+        }
+        if (rsa)
+        {
+            RSA_free(rsa);
+        }
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    if (BN_set_word(bn, RSA_F4) != 1 ||
+        RSA_generate_key_ex(rsa, 2048, bn, nullptr) != 1)
+    {
+        BN_free(bn);
+        RSA_free(rsa);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    if (EVP_PKEY_assign_RSA(pkey, rsa) != 1)
+    {
+        BN_free(bn);
+        RSA_free(rsa);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    BN_free(bn);
+
+    std::ofstream out(path.string(), std::ios::binary);
+    if (!out)
+    {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio)
+    {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    if (PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr,
+                                 nullptr) != 1)
+    {
+        BIO_free(bio);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    BUF_MEM *buf = nullptr;
+    BIO_get_mem_ptr(bio, &buf);
+    if (!buf || !buf->data || buf->length == 0)
+    {
+        BIO_free(bio);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    out.write(buf->data, static_cast<std::streamsize>(buf->length));
+    BIO_free(bio);
+    EVP_PKEY_free(pkey);
+    return static_cast<bool>(out);
 }
 }  // namespace
 
@@ -465,4 +549,168 @@ DROGON_TEST(PayPlugin_Refund_IdempotencyInProgress)
         redisKey.c_str());
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1",
                         "refund:" + idempotencyKey);
+}
+
+DROGON_TEST(PayPlugin_QueryRefund_WechatSuccess)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_refund ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "refund_no VARCHAR(64) NOT NULL UNIQUE,"
+        "order_no VARCHAR(64) NOT NULL,"
+        "payment_no VARCHAR(64) NOT NULL,"
+        "channel_refund_no VARCHAR(64),"
+        "status VARCHAR(24) NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "response_payload TEXT,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_order ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "order_no VARCHAR(64) NOT NULL UNIQUE,"
+        "user_id BIGINT NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "currency VARCHAR(16) NOT NULL,"
+        "status VARCHAR(24) NOT NULL,"
+        "channel VARCHAR(16) NOT NULL,"
+        "title VARCHAR(128) NOT NULL,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_ledger ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "user_id BIGINT NOT NULL,"
+        "order_no VARCHAR(64) NOT NULL,"
+        "payment_no VARCHAR(64),"
+        "entry_type VARCHAR(16) NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    const std::string orderNo = "ord_" + drogon::utils::getUuid();
+    const std::string paymentNo = "pay_" + drogon::utils::getUuid();
+    const std::string amount = "8.88";
+
+    using PayOrder = drogon_model::pay_test::PayOrder;
+    drogon::orm::Mapper<PayOrder> orderMapper(client);
+    PayOrder order;
+    order.setOrderNo(orderNo);
+    order.setUserId(30001);
+    order.setAmount(amount);
+    order.setCurrency("CNY");
+    order.setStatus("PAYING");
+    order.setChannel("wechat");
+    order.setTitle("Refund Order");
+    order.setCreatedAt(trantor::Date::now());
+    order.setUpdatedAt(trantor::Date::now());
+    orderMapper.insert(order);
+
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> refundMapper(client);
+    PayRefund refund;
+    refund.setRefundNo(refundNo);
+    refund.setOrderNo(orderNo);
+    refund.setPaymentNo(paymentNo);
+    refund.setStatus("REFUNDING");
+    refund.setAmount(amount);
+    refund.setCreatedAt(trantor::Date::now());
+    refund.setUpdatedAt(trantor::Date::now());
+    refundMapper.insert(refund);
+
+    const uint16_t port = 24080;
+    drogon::app().addListener("127.0.0.1", port);
+    drogon::app().registerHandler(
+        "/v3/refund/domestic/refunds/{1}",
+        [refundNo](const drogon::HttpRequestPtr &req,
+                   std::function<void(const drogon::HttpResponsePtr &)> &&cb,
+                   const std::string &param) {
+            Json::Value body;
+            body["status"] = "SUCCESS";
+            body["refund_id"] = "wx_refund_1";
+            body["out_refund_no"] = param;
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
+            cb(resp);
+        },
+        {drogon::Get});
+
+    std::thread serverThread([]() { drogon::app().run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto keyPath =
+        tempDir / ("wechatpay_key_" + drogon::utils::getUuid() + ".pem");
+    CHECK(writeTempPrivateKey(keyPath));
+
+    Json::Value wechatConfig;
+    wechatConfig["api_base"] =
+        "http://127.0.0.1:" + std::to_string(port);
+    wechatConfig["mch_id"] = "mch_123";
+    wechatConfig["serial_no"] = "SERIAL_TEST";
+    wechatConfig["private_key_path"] = keyPath.string();
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, client);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Get);
+    req->setParameter("refund_no", refundNo);
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.queryRefund(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k200OK);
+    const auto respJson = resp->getJsonObject();
+    CHECK(respJson != nullptr);
+    CHECK((*respJson)["refund_no"].asString() == refundNo);
+    CHECK((*respJson)["status"].asString() == "REFUND_SUCCESS");
+    CHECK((*respJson)["wechat_response"]["status"].asString() == "SUCCESS");
+
+    const auto updated = refundMapper.findByPrimaryKey(
+        refund.getValueOfId());
+    CHECK(updated.getValueOfStatus() == "REFUND_SUCCESS");
+    CHECK(updated.getValueOfChannelRefundNo() == "wx_refund_1");
+
+    const auto ledgerRows = client->execSqlSync(
+        "SELECT COUNT(*) AS cnt FROM pay_ledger WHERE order_no = $1",
+        orderNo);
+    CHECK(!ledgerRows.empty());
+    CHECK(ledgerRows.front()["cnt"].as<int64_t>() == 1);
+
+    drogon::app().quit();
+    if (serverThread.joinable())
+    {
+        serverThread.join();
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(keyPath, ec);
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE refund_no = $1",
+                        refundNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
 }
