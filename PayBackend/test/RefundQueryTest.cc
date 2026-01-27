@@ -141,3 +141,86 @@ DROGON_TEST(PayPlugin_QueryRefund_NoWechatClient)
     client->execSqlSync("DELETE FROM pay_refund WHERE refund_no = $1",
                         refundNo);
 }
+
+DROGON_TEST(PayPlugin_QueryRefund_WechatQueryError)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_refund ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "refund_no VARCHAR(64) NOT NULL UNIQUE,"
+        "order_no VARCHAR(64) NOT NULL,"
+        "payment_no VARCHAR(64) NOT NULL,"
+        "channel_refund_no VARCHAR(64),"
+        "status VARCHAR(24) NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "response_payload TEXT,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    const std::string orderNo = "ord_" + drogon::utils::getUuid();
+    const std::string paymentNo = "pay_" + drogon::utils::getUuid();
+    const std::string amount = "19.99";
+
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> refundMapper(client);
+    PayRefund refund;
+    refund.setRefundNo(refundNo);
+    refund.setOrderNo(orderNo);
+    refund.setPaymentNo(paymentNo);
+    refund.setStatus("REFUNDING");
+    refund.setAmount(amount);
+    refund.setCreatedAt(trantor::Date::now());
+    refund.setUpdatedAt(trantor::Date::now());
+    refundMapper.insert(refund);
+
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "";
+    wechatConfig["notify_url"] = "https://notify.invalid";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, client);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Get);
+    req->setParameter("refund_no", refundNo);
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.queryRefund(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k200OK);
+    CHECK(resp->getHeader("X-Wechat-Query-Error") ==
+          "wechat pay config missing mch_id/serial_no/private_key_path");
+    const auto respJson = resp->getJsonObject();
+    CHECK(respJson != nullptr);
+    CHECK((*respJson)["refund_no"].asString() == refundNo);
+    CHECK((*respJson)["status"].asString() == "REFUNDING");
+
+    client->execSqlSync("DELETE FROM pay_refund WHERE refund_no = $1",
+                        refundNo);
+}
