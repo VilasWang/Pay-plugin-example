@@ -141,3 +141,84 @@ DROGON_TEST(PayPlugin_QueryOrder_NoWechatClient)
 
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
 }
+
+DROGON_TEST(PayPlugin_QueryOrder_WechatQueryError)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_order ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "order_no VARCHAR(64) NOT NULL UNIQUE,"
+        "user_id BIGINT NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "currency VARCHAR(16) NOT NULL,"
+        "status VARCHAR(24) NOT NULL,"
+        "channel VARCHAR(16) NOT NULL,"
+        "title VARCHAR(128) NOT NULL,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+
+    const std::string orderNo = "ord_" + drogon::utils::getUuid();
+    const std::string amount = "29.99";
+
+    using PayOrder = drogon_model::pay_test::PayOrder;
+    drogon::orm::Mapper<PayOrder> orderMapper(client);
+    PayOrder order;
+    order.setOrderNo(orderNo);
+    order.setUserId(20002);
+    order.setAmount(amount);
+    order.setCurrency("CNY");
+    order.setStatus("PAYING");
+    order.setChannel("wechat");
+    order.setTitle("Query Order Error");
+    order.setCreatedAt(trantor::Date::now());
+    order.setUpdatedAt(trantor::Date::now());
+    orderMapper.insert(order);
+
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "";
+    wechatConfig["notify_url"] = "https://notify.invalid";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, client);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Get);
+    req->setParameter("order_no", orderNo);
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.queryOrder(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k200OK);
+    CHECK(resp->getHeader("X-Wechat-Query-Error") == "missing mch_id");
+    const auto respJson = resp->getJsonObject();
+    CHECK(respJson != nullptr);
+    CHECK((*respJson)["order_no"].asString() == orderNo);
+    CHECK((*respJson)["status"].asString() == "PAYING");
+
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
+}
