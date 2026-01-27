@@ -1,4 +1,5 @@
 #include <drogon/drogon_test.h>
+#include <drogon/nosql/RedisClient.h>
 #include <drogon/utils/Utilities.h>
 #include "../models/PayRefund.h"
 #include "../plugins/PayPlugin.h"
@@ -63,6 +64,19 @@ std::string buildPgConnInfo(const Json::Value &db)
         connInfo += " password=" + passwd;
     }
     return connInfo;
+}
+
+drogon::nosql::RedisClientPtr buildRedisClient(const Json::Value &redis)
+{
+    const std::string host = redis.get("host", "127.0.0.1").asString();
+    const int port = redis.get("port", 6379).asInt();
+    const std::string password = redis.get("passwd", "").asString();
+    const unsigned int db = redis.get("db", 0).asUInt();
+    const std::string username = redis.get("username", "").asString();
+
+    trantor::InetAddress addr(host, static_cast<uint16_t>(port));
+    return drogon::nosql::RedisClient::newRedisClient(
+        addr, 1, password, db, username);
 }
 }  // namespace
 
@@ -366,4 +380,89 @@ DROGON_TEST(PayPlugin_Refund_IdempotencySnapshot)
 
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1",
                         idempKey);
+}
+
+DROGON_TEST(PayPlugin_Refund_IdempotencyInProgress)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+    CHECK(root.isMember("redis_clients"));
+    CHECK(root["redis_clients"].isArray());
+    CHECK(!root["redis_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+        "idempotency_key VARCHAR(64) PRIMARY KEY,"
+        "request_hash TEXT NOT NULL,"
+        "response_snapshot TEXT,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "expires_at TIMESTAMPTZ NOT NULL)");
+
+    auto redisClient = buildRedisClient(root["redis_clients"][0]);
+    CHECK(redisClient != nullptr);
+
+    const std::string idempotencyKey = "idem_" + drogon::utils::getUuid();
+    Json::Value payload;
+    payload["order_no"] = "ord_" + drogon::utils::getUuid();
+    payload["amount"] = "1.23";
+    const std::string body = pay::utils::toJsonString(payload);
+    const std::string requestHash = drogon::utils::getSha256(body);
+
+    const std::string redisKey = "pay:idempotency:refund:" + idempotencyKey;
+    const auto setResult = redisClient->execCommandSync<std::string>(
+        [](const drogon::nosql::RedisResult &r) {
+            if (r.type() == drogon::nosql::RedisResultType::kNil)
+            {
+                return std::string("NIL");
+            }
+            return r.asString();
+        },
+        "SET %s %s NX EX %d",
+        redisKey.c_str(),
+        requestHash.c_str(),
+        60);
+    CHECK(setResult == "OK");
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, client, redisClient, true);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+    req->setBody(body);
+    req->addHeader("Idempotency-Key", idempotencyKey);
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.refund(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k409Conflict);
+    CHECK(resp->body().find("idempotency key in progress") != std::string::npos);
+
+    redisClient->execCommandSync<int>(
+        [](const drogon::nosql::RedisResult &r) {
+            return static_cast<int>(r.asInteger());
+        },
+        "DEL %s",
+        redisKey.c_str());
+    client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1",
+                        "refund:" + idempotencyKey);
 }
