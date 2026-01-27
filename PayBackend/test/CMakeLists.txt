@@ -16,6 +16,7 @@ set(TEST_SRC
     PayAuthFilterTest.cc
     PayAuthMetricsTest.cc
     PayUtilsTest.cc
+    QueryOrderTest.cc
     WechatPayClientTest.cc
     WechatCallbackIntegrationTest.cc
     RefundQueryTest.cc
