@@ -285,3 +285,78 @@ DROGON_TEST(PayPlugin_CreatePayment_IdempotencySnapshot)
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1",
                         idempKey);
 }
+
+DROGON_TEST(PayPlugin_CreatePayment_IdempotencyConflict)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+    ensureCreatePaymentTables(client);
+
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "mch_123";
+    wechatConfig["notify_url"] = "https://notify.invalid";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, client);
+
+    const std::string idempotencyKey = "idem_" + drogon::utils::getUuid();
+    const std::string title = "CreatePayConflict_" + drogon::utils::getUuid();
+    Json::Value payload;
+    payload["user_id"] = "10003";
+    payload["amount"] = "29.99";
+    payload["currency"] = "CNY";
+    payload["title"] = title;
+    const std::string body = pay::utils::toJsonString(payload);
+
+    const std::string idempKey = "create:" + idempotencyKey;
+    client->execSqlSync(
+        "INSERT INTO pay_idempotency "
+        "(idempotency_key, request_hash, response_snapshot, expires_at) "
+        "VALUES ($1, $2, $3, NOW() + INTERVAL '1 day')",
+        idempKey,
+        "other_hash",
+        "{}");
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+    req->setBody(body);
+    req->addHeader("Idempotency-Key", idempotencyKey);
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.createPayment(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k409Conflict);
+    CHECK(resp->body().find("idempotency key conflict") != std::string::npos);
+
+    const auto countRows = client->execSqlSync(
+        "SELECT COUNT(*) AS cnt FROM pay_order WHERE title = $1",
+        title);
+    CHECK(!countRows.empty());
+    CHECK(countRows.front()["cnt"].as<int64_t>() == 0);
+
+    client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1",
+                        idempKey);
+}
