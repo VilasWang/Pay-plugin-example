@@ -291,3 +291,79 @@ DROGON_TEST(PayPlugin_Refund_IdempotencyConflict)
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1",
                         idempKey);
 }
+
+DROGON_TEST(PayPlugin_Refund_IdempotencySnapshot)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+        "idempotency_key VARCHAR(64) PRIMARY KEY,"
+        "request_hash TEXT NOT NULL,"
+        "response_snapshot TEXT,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "expires_at TIMESTAMPTZ NOT NULL)");
+
+    const std::string idempotencyKey = "idem_" + drogon::utils::getUuid();
+    Json::Value payload;
+    payload["order_no"] = "ord_" + drogon::utils::getUuid();
+    payload["amount"] = "12.34";
+    const std::string body = pay::utils::toJsonString(payload);
+    const std::string requestHash = drogon::utils::getSha256(body);
+
+    Json::Value snapshot;
+    snapshot["refund_no"] = "refund_prev";
+    snapshot["order_no"] = payload["order_no"];
+    snapshot["status"] = "REFUNDING";
+    const std::string snapshotBody = pay::utils::toJsonString(snapshot);
+
+    const std::string idempKey = "refund:" + idempotencyKey;
+    client->execSqlSync(
+        "INSERT INTO pay_idempotency "
+        "(idempotency_key, request_hash, response_snapshot, expires_at) "
+        "VALUES ($1, $2, $3, NOW() + INTERVAL '1 day')",
+        idempKey,
+        requestHash,
+        snapshotBody);
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, client);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+    req->setBody(body);
+    req->addHeader("Idempotency-Key", idempotencyKey);
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.refund(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k200OK);
+    auto respJson = resp->getJsonObject();
+    CHECK(respJson != nullptr);
+    CHECK((*respJson)["refund_no"].asString() == "refund_prev");
+    CHECK((*respJson)["status"].asString() == "REFUNDING");
+
+    client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1",
+                        idempKey);
+}
