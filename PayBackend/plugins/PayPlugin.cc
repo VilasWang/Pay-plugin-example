@@ -419,7 +419,6 @@ void PayPlugin::syncRefundStatusFromWechat(
 
     const std::string refundStatus = mapRefundStatus(wechatStatus);
     const std::string refundId = result.get("refund_id", "").asString();
-    const std::string responsePayload = toJsonString(result);
 
     LOG_INFO << "Sync refund status from WeChat: refund_no=" << refundNo
              << " wechat_status=" << wechatStatus
@@ -450,8 +449,7 @@ void PayPlugin::syncRefundStatusFromWechat(
                                           refundNo);
     refundMapper.findOne(
         criteria,
-        [this, refundStatus, refundId, responsePayload, done](
-            PayRefundModel refund) {
+        [this, refundStatus, refundId, refundNo, done](PayRefundModel refund) {
             if (refund.getValueOfStatus() == "REFUND_SUCCESS")
             {
                 if (done)
@@ -465,7 +463,6 @@ void PayPlugin::syncRefundStatusFromWechat(
             const auto refundAmount = refund.getValueOfAmount();
             refund.setStatus(refundStatus);
             refund.setChannelRefundNo(refundId);
-            refund.setResponsePayload(responsePayload);
             refund.setUpdatedAt(trantor::Date::now());
 
             drogon::orm::Mapper<PayRefundModel> refundUpdater(dbClient_);
@@ -1885,6 +1882,11 @@ void PayPlugin::handleWechatCallback(
                     "missing refund_no/refund_status");
             return;
         }
+        if (associatedData != "refund")
+        {
+            respond(drogon::k400BadRequest, "invalid refund associated_data");
+            return;
+        }
 
         std::string idempotencyKey = notifyJson.get("id", "").asString();
         if (idempotencyKey.empty())
@@ -1955,6 +1957,7 @@ void PayPlugin::handleWechatCallback(
                          signature,
                          serial,
                          plaintext,
+                         body,
                          plainJson](const PayIdempotencyModel &) {
                             const std::string refundStatus =
                                 mapRefundStatus(refundStatusRaw);
@@ -1983,6 +1986,8 @@ void PayPlugin::handleWechatCallback(
                                  refundId,
                                  signature,
                                  serial,
+                                 refundNo,
+                                 body,
                                  plaintext,
                                  plainJson](PayRefundModel refund) {
                                     if (refund.getValueOfStatus() ==
@@ -2053,8 +2058,8 @@ void PayPlugin::handleWechatCallback(
                                          notifyCurrency,
                                          signature,
                                          serial,
+                                         refundNo,
                                          body,
-                                         plaintext,
                                          refund](const PayOrderModel &order) mutable {
                                             const std::string orderCurrency =
                                                 order.getValueOfCurrency();
@@ -2073,7 +2078,6 @@ void PayPlugin::handleWechatCallback(
 
                                             refund.setStatus(refundStatus);
                                             refund.setChannelRefundNo(refundId);
-                                            refund.setResponsePayload(plaintext);
                                             refund.setUpdatedAt(trantor::Date::now());
 
                                             drogon::orm::Mapper<PayRefundModel>
@@ -2087,9 +2091,10 @@ void PayPlugin::handleWechatCallback(
                                                  orderNo,
                                                  paymentNo,
                                                  order,
-                                                 signature,
-                                                 serial,
-                                                 body](const size_t) {
+                                                signature,
+                                                serial,
+                                                body,
+                                                refundNo](const size_t) {
                                                     if (refundStatus ==
                                                         "REFUND_SUCCESS")
                                                     {
@@ -2226,6 +2231,11 @@ void PayPlugin::handleWechatCallback(
     if (eventType.rfind("TRANSACTION.", 0) != 0)
     {
         respond(drogon::k400BadRequest, "invalid transaction event_type");
+        return;
+    }
+    if (associatedData != "transaction")
+    {
+        respond(drogon::k400BadRequest, "invalid transaction associated_data");
         return;
     }
     if (orderNo.empty() || tradeState.empty())

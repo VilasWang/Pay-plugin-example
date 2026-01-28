@@ -1635,6 +1635,204 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidTradeState)
     std::filesystem::remove(certPath, ec);
 }
 
+DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundAssociatedData)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto certPath =
+        tempDir / ("wechatpay_cb_" + drogon::utils::getUuid() + ".pem");
+    {
+        std::ofstream out(certPath.string(), std::ios::binary);
+        out << certPem;
+    }
+
+    const std::string apiV3Key = "0123456789abcdef0123456789abcdef";
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = apiV3Key;
+    wechatConfig["platform_cert_path"] = certPath.string();
+    wechatConfig["serial_no"] = "SERIAL_TEST";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "mch_123";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    Json::Value plain;
+    plain["out_refund_no"] = "refund_" + drogon::utils::getUuid();
+    plain["refund_status"] = "SUCCESS";
+    plain["refund_id"] = "wx_refund_1";
+    plain["appid"] = wechatConfig["app_id"].asString();
+    plain["mchid"] = wechatConfig["mch_id"].asString();
+    plain["amount"]["refund"] = 100;
+    plain["amount"]["currency"] = "CNY";
+    const std::string plainText = toJsonCompact(plain);
+
+    const std::string nonce = "nonce123";
+    const std::string aad = "transaction";
+    const std::string ciphertext =
+        encryptAesGcm(plainText, nonce, aad, apiV3Key);
+    CHECK(!ciphertext.empty());
+
+    Json::Value notify;
+    notify["id"] = "notify_" + drogon::utils::getUuid();
+    notify["event_type"] = "REFUND.SUCCESS";
+    notify["resource_type"] = "encrypt-resource";
+    notify["resource"]["algorithm"] = "AEAD_AES_256_GCM";
+    notify["resource"]["ciphertext"] = ciphertext;
+    notify["resource"]["nonce"] = nonce;
+    notify["resource"]["associated_data"] = aad;
+    const std::string body = toJsonCompact(notify);
+
+    const std::string timestamp = "1700000000";
+    const std::string headerNonce = "headerNonce";
+    const std::string message =
+        timestamp + "\n" + headerNonce + "\n" + body + "\n";
+    std::string signatureB64;
+    CHECK(signMessage(message, pkey, signatureB64));
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, client);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setBody(body);
+    req->addHeader("Wechatpay-Timestamp", timestamp);
+    req->addHeader("Wechatpay-Nonce", headerNonce);
+    req->addHeader("Wechatpay-Signature", signatureB64);
+    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.handleWechatCallback(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k400BadRequest);
+
+    EVP_PKEY_free(pkey);
+    std::error_code ec;
+    std::filesystem::remove(certPath, ec);
+}
+
+DROGON_TEST(PayPlugin_WechatCallback_InvalidTransactionAssociatedData)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto certPath =
+        tempDir / ("wechatpay_cb_" + drogon::utils::getUuid() + ".pem");
+    {
+        std::ofstream out(certPath.string(), std::ios::binary);
+        out << certPem;
+    }
+
+    const std::string apiV3Key = "0123456789abcdef0123456789abcdef";
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = apiV3Key;
+    wechatConfig["platform_cert_path"] = certPath.string();
+    wechatConfig["serial_no"] = "SERIAL_TEST";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "mch_123";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    Json::Value plain;
+    plain["out_trade_no"] = "ord_" + drogon::utils::getUuid();
+    plain["transaction_id"] = "tx_" + drogon::utils::getUuid();
+    plain["trade_state"] = "SUCCESS";
+    plain["appid"] = wechatConfig["app_id"].asString();
+    plain["mchid"] = wechatConfig["mch_id"].asString();
+    plain["amount"]["total"] = 1999;
+    plain["amount"]["currency"] = "CNY";
+    const std::string plainText = toJsonCompact(plain);
+
+    const std::string nonce = "nonce123";
+    const std::string aad = "refund";
+    const std::string ciphertext =
+        encryptAesGcm(plainText, nonce, aad, apiV3Key);
+    CHECK(!ciphertext.empty());
+
+    Json::Value notify;
+    notify["id"] = "notify_" + drogon::utils::getUuid();
+    notify["event_type"] = "TRANSACTION.SUCCESS";
+    notify["resource_type"] = "encrypt-resource";
+    notify["resource"]["algorithm"] = "AEAD_AES_256_GCM";
+    notify["resource"]["ciphertext"] = ciphertext;
+    notify["resource"]["nonce"] = nonce;
+    notify["resource"]["associated_data"] = aad;
+    const std::string body = toJsonCompact(notify);
+
+    const std::string timestamp = "1700000000";
+    const std::string headerNonce = "headerNonce";
+    const std::string message =
+        timestamp + "\n" + headerNonce + "\n" + body + "\n";
+    std::string signatureB64;
+    CHECK(signMessage(message, pkey, signatureB64));
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, client);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setBody(body);
+    req->addHeader("Wechatpay-Timestamp", timestamp);
+    req->addHeader("Wechatpay-Nonce", headerNonce);
+    req->addHeader("Wechatpay-Signature", signatureB64);
+    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.handleWechatCallback(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k400BadRequest);
+
+    EVP_PKEY_free(pkey);
+    std::error_code ec;
+    std::filesystem::remove(certPath, ec);
+}
+
 DROGON_TEST(PayPlugin_WechatCallback_UnsupportedResourceType)
 {
     Json::Value root;
@@ -2218,6 +2416,9 @@ DROGON_TEST(PayPlugin_WechatCallback_MchIdMismatch)
         "response_payload TEXT,"
         "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
         "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+    client->execSqlSync(
+        "ALTER TABLE pay_refund "
+        "ADD COLUMN IF NOT EXISTS response_payload TEXT");
     client->execSqlSync(
         "CREATE TABLE IF NOT EXISTS pay_callback ("
         "id BIGSERIAL PRIMARY KEY,"
@@ -2959,21 +3160,6 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundSuccess)
         refundMapper.findByPrimaryKey(refund.getValueOfId());
     CHECK(updatedRefund.getValueOfStatus() == "REFUND_SUCCESS");
     CHECK(updatedRefund.getValueOfChannelRefundNo() == refundId);
-    CHECK(!updatedRefund.getValueOfResponsePayload().empty());
-    {
-        Json::CharReaderBuilder builder;
-        std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-        Json::Value payload;
-        std::string errors;
-        const auto responsePayload =
-            updatedRefund.getValueOfResponsePayload();
-        CHECK(reader->parse(responsePayload.data(),
-                            responsePayload.data() + responsePayload.size(),
-                            &payload,
-                            &errors));
-        CHECK(payload.get("refund_id", "").asString() == refundId);
-        CHECK(payload.get("out_refund_no", "").asString() == refundNo);
-    }
 
     const auto ledgerRows = client->execSqlSync(
         "SELECT entry_type FROM pay_ledger WHERE order_no = $1",
