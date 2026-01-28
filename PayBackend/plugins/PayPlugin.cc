@@ -1791,6 +1791,19 @@ void PayPlugin::handleWechatCallback(
     }
 
     const auto &resource = notifyJson["resource"];
+    const std::string resourceType =
+        notifyJson.get("resource_type", "").asString();
+    if (resourceType.empty() || resourceType != "encrypt-resource")
+    {
+        respond(drogon::k400BadRequest, "unsupported resource_type");
+        return;
+    }
+    const std::string algorithm = resource.get("algorithm", "").asString();
+    if (algorithm.empty() || algorithm != "AEAD_AES_256_GCM")
+    {
+        respond(drogon::k400BadRequest, "unsupported resource algorithm");
+        return;
+    }
     const std::string ciphertext = resource.get("ciphertext", "").asString();
     const std::string nonceStr = resource.get("nonce", "").asString();
     const std::string associatedData =
