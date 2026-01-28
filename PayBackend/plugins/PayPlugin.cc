@@ -2060,6 +2060,7 @@ void PayPlugin::handleWechatCallback(
 
                                             refund.setStatus(refundStatus);
                                             refund.setChannelRefundNo(refundId);
+                                            refund.setResponsePayload(plaintext);
                                             refund.setUpdatedAt(trantor::Date::now());
 
                                             drogon::orm::Mapper<PayRefundModel>

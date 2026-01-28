@@ -2946,6 +2946,21 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundSuccess)
         refundMapper.findByPrimaryKey(refund.getValueOfId());
     CHECK(updatedRefund.getValueOfStatus() == "REFUND_SUCCESS");
     CHECK(updatedRefund.getValueOfChannelRefundNo() == refundId);
+    CHECK(!updatedRefund.getValueOfResponsePayload().empty());
+    {
+        Json::CharReaderBuilder builder;
+        std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+        Json::Value payload;
+        std::string errors;
+        const auto responsePayload =
+            updatedRefund.getValueOfResponsePayload();
+        CHECK(reader->parse(responsePayload.data(),
+                            responsePayload.data() + responsePayload.size(),
+                            &payload,
+                            &errors));
+        CHECK(payload.get("refund_id", "").asString() == refundId);
+        CHECK(payload.get("out_refund_no", "").asString() == refundNo);
+    }
 
     const auto ledgerRows = client->execSqlSync(
         "SELECT entry_type FROM pay_ledger WHERE order_no = $1",
