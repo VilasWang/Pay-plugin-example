@@ -732,6 +732,26 @@ void PayPlugin::proceedCreatePayment(
                                                                 "PAYING";
                                                             body["wechat_response"] =
                                                                 result;
+                                                            const auto codeUrl =
+                                                                result.get(
+                                                                    "code_url",
+                                                                    "")
+                                                                    .asString();
+                                                            if (!codeUrl.empty())
+                                                            {
+                                                                body["code_url"] =
+                                                                    codeUrl;
+                                                            }
+                                                            const auto prepayId =
+                                                                result.get(
+                                                                    "prepay_id",
+                                                                    "")
+                                                                    .asString();
+                                                            if (!prepayId.empty())
+                                                            {
+                                                                body["prepay_id"] =
+                                                                    prepayId;
+                                                            }
                                                             const std::string responseSnapshot =
                                                                 toJsonString(body);
                                                             storeIdempotencySnapshot(

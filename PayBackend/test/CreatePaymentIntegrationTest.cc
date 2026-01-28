@@ -1,6 +1,10 @@
+#include <drogon/drogon.h>
 #include <drogon/drogon_test.h>
 #include <drogon/orm/DbClient.h>
 #include <drogon/utils/Utilities.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -64,6 +68,84 @@ std::string buildPgConnInfo(const Json::Value &db)
         connInfo += " password=" + passwd;
     }
     return connInfo;
+}
+
+bool writeTempPrivateKey(const std::filesystem::path &path)
+{
+    EVP_PKEY *pkey = EVP_PKEY_new();
+    if (!pkey)
+    {
+        return false;
+    }
+
+    RSA *rsa = RSA_new();
+    BIGNUM *bn = BN_new();
+    if (!rsa || !bn)
+    {
+        if (bn)
+        {
+            BN_free(bn);
+        }
+        if (rsa)
+        {
+            RSA_free(rsa);
+        }
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    if (BN_set_word(bn, RSA_F4) != 1 ||
+        RSA_generate_key_ex(rsa, 2048, bn, nullptr) != 1)
+    {
+        BN_free(bn);
+        RSA_free(rsa);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    if (EVP_PKEY_assign_RSA(pkey, rsa) != 1)
+    {
+        BN_free(bn);
+        RSA_free(rsa);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    BN_free(bn);
+
+    std::ofstream out(path.string(), std::ios::binary);
+    if (!out)
+    {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio)
+    {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+    if (PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr,
+                                 nullptr) != 1)
+    {
+        BIO_free(bio);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    BUF_MEM *buf = nullptr;
+    BIO_get_mem_ptr(bio, &buf);
+    if (!buf || !buf->data || buf->length == 0)
+    {
+        BIO_free(bio);
+        EVP_PKEY_free(pkey);
+        return false;
+    }
+
+    out.write(buf->data, static_cast<std::streamsize>(buf->length));
+    BIO_free(bio);
+    EVP_PKEY_free(pkey);
+    return static_cast<bool>(out);
 }
 
 void ensureCreatePaymentTables(
@@ -196,6 +278,106 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatError)
     std::string orderNo;
     CHECK(waitForOrderStatus(client, title, orderNo, "FAILED", "FAIL"));
 
+    client->execSqlSync("DELETE FROM pay_payment WHERE order_no = $1", orderNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
+}
+
+DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+    ensureCreatePaymentTables(client);
+
+    const uint16_t port = 24088;
+    drogon::app().addListener("127.0.0.1", port);
+    drogon::app().registerHandler(
+        "/v3/pay/transactions/native",
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
+            Json::Value body;
+            body["code_url"] = "weixin://wxpay/mock_qr";
+            body["prepay_id"] = "prepay_mock_1";
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
+            cb(resp);
+        },
+        {drogon::Post});
+
+    std::thread serverThread([]() { drogon::app().run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto keyPath =
+        tempDir / ("wechatpay_key_" + drogon::utils::getUuid() + ".pem");
+    CHECK(writeTempPrivateKey(keyPath));
+
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "mch_987";
+    wechatConfig["notify_url"] = "https://notify.invalid";
+    wechatConfig["serial_no"] = "SERIAL_CREATE_TEST";
+    wechatConfig["private_key_path"] = keyPath.string();
+    wechatConfig["api_base"] =
+        "http://127.0.0.1:" + std::to_string(port);
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, client);
+
+    const std::string title = "CreatePayOK_" + drogon::utils::getUuid();
+    Json::Value payload;
+    payload["user_id"] = "10003";
+    payload["amount"] = "9.99";
+    payload["currency"] = "CNY";
+    payload["title"] = title;
+    const std::string body = pay::utils::toJsonString(payload);
+
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+    req->setBody(body);
+
+    std::promise<drogon::HttpResponsePtr> promise;
+    plugin.createPayment(
+        req,
+        [&promise](const drogon::HttpResponsePtr &resp) {
+            promise.set_value(resp);
+        });
+
+    auto future = promise.get_future();
+    CHECK(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+    const auto resp = future.get();
+    CHECK(resp != nullptr);
+    CHECK(resp->statusCode() == drogon::k200OK);
+    const auto respJson = resp->getJsonObject();
+    CHECK(respJson != nullptr);
+    CHECK((*respJson)["status"].asString() == "PAYING");
+    CHECK((*respJson)["code_url"].asString() ==
+          "weixin://wxpay/mock_qr");
+    CHECK((*respJson)["prepay_id"].asString() == "prepay_mock_1");
+
+    std::string orderNo;
+    CHECK(waitForOrderStatus(client, title, orderNo, "PAYING", "PROCESSING"));
+
+    drogon::app().quit();
+    if (serverThread.joinable())
+    {
+        serverThread.join();
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(keyPath, ec);
     client->execSqlSync("DELETE FROM pay_payment WHERE order_no = $1", orderNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
 }
