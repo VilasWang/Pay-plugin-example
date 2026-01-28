@@ -1902,6 +1902,8 @@ void PayPlugin::handleWechatCallback(
                                 refundNo,
                                 refundStatusRaw,
                                 refundId,
+                                signature,
+                                serial,
                                 plaintext,
                                 body,
                                 plainJson]() {
@@ -1925,6 +1927,8 @@ void PayPlugin::handleWechatCallback(
                  refundNo,
                  refundStatusRaw,
                  refundId,
+                 signature,
+                 serial,
                  plaintext,
                  body,
                  plainJson](const drogon::orm::DrogonDbException &) {
@@ -1948,6 +1952,8 @@ void PayPlugin::handleWechatCallback(
                          refundNo,
                          refundStatusRaw,
                          refundId,
+                         signature,
+                         serial,
                          plaintext,
                          plainJson](const PayIdempotencyModel &) {
                             const std::string refundStatus =
@@ -1975,6 +1981,8 @@ void PayPlugin::handleWechatCallback(
                                  callbackPtr,
                                  refundStatus,
                                  refundId,
+                                 signature,
+                                 serial,
                                  plaintext,
                                  plainJson](PayRefundModel refund) {
                                     if (refund.getValueOfStatus() ==
@@ -2043,6 +2051,9 @@ void PayPlugin::handleWechatCallback(
                                          orderNo,
                                          paymentNo,
                                          notifyCurrency,
+                                         signature,
+                                         serial,
+                                         body,
                                          plaintext,
                                          refund](const PayOrderModel &order) mutable {
                                             const std::string orderCurrency =
@@ -2075,7 +2086,10 @@ void PayPlugin::handleWechatCallback(
                                                  refundAmount,
                                                  orderNo,
                                                  paymentNo,
-                                                 order](const size_t) {
+                                                 order,
+                                                 signature,
+                                                 serial,
+                                                 body](const size_t) {
                                                     if (refundStatus ==
                                                         "REFUND_SUCCESS")
                                                     {
@@ -2087,13 +2101,47 @@ void PayPlugin::handleWechatCallback(
                                                             "REFUND",
                                                             refundAmount);
                                                     }
-                                                    Json::Value ok;
-                                                    ok["code"] = "SUCCESS";
-                                                    ok["message"] = "OK";
-                                                    auto resp =
-                                                        drogon::HttpResponse::
-                                                            newHttpJsonResponse(ok);
-                                                    (*callbackPtr)(resp);
+                                                    PayCallbackModel callbackRow;
+                                                    callbackRow.setPaymentNo(
+                                                        paymentNo);
+                                                    callbackRow.setRawBody(
+                                                        body);
+                                                    callbackRow.setSignature(
+                                                        signature);
+                                                    callbackRow.setSerialNo(
+                                                        serial);
+                                                    callbackRow.setVerified(true);
+                                                    callbackRow.setProcessed(true);
+                                                    callbackRow.setReceivedAt(
+                                                        trantor::Date::now());
+
+                                                    drogon::orm::Mapper<PayCallbackModel>
+                                                        callbackMapper(dbClient_);
+                                                    callbackMapper.insert(
+                                                        callbackRow,
+                                                        [callbackPtr](const PayCallbackModel &) {
+                                                            Json::Value ok;
+                                                            ok["code"] = "SUCCESS";
+                                                            ok["message"] = "OK";
+                                                            auto resp =
+                                                                drogon::HttpResponse::
+                                                                    newHttpJsonResponse(
+                                                                        ok);
+                                                            (*callbackPtr)(resp);
+                                                        },
+                                                        [callbackPtr](
+                                                            const drogon::orm::
+                                                                DrogonDbException &e) {
+                                                            auto resp =
+                                                                drogon::HttpResponse::
+                                                                    newHttpResponse();
+                                                            resp->setStatusCode(
+                                                                drogon::k500InternalServerError);
+                                                            resp->setBody(
+                                                                std::string("db error: ") +
+                                                                e.base().what());
+                                                            (*callbackPtr)(resp);
+                                                        });
                                                 },
                                                 [callbackPtr](
                                                     const drogon::orm::DrogonDbException &e) {

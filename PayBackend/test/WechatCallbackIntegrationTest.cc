@@ -2218,6 +2218,19 @@ DROGON_TEST(PayPlugin_WechatCallback_MchIdMismatch)
         "response_payload TEXT,"
         "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
         "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_callback ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "payment_no VARCHAR(64) NOT NULL,"
+        "raw_body TEXT NOT NULL,"
+        "signature VARCHAR(512),"
+        "serial_no VARCHAR(64),"
+        "verified BOOLEAN NOT NULL DEFAULT FALSE,"
+        "processed BOOLEAN NOT NULL DEFAULT FALSE,"
+        "received_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+    client->execSqlSync(
+        "ALTER TABLE pay_callback "
+        "ALTER COLUMN signature TYPE VARCHAR(512)");
 
     const std::string orderNo = "ord_" + drogon::utils::getUuid();
     const std::string paymentNo = "pay_" + drogon::utils::getUuid();
@@ -2968,7 +2981,15 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundSuccess)
     CHECK(ledgerRows.size() >= 1);
     CHECK(ledgerRows.front()["entry_type"].as<std::string>() == "REFUND");
 
+    const auto callbackRows = client->execSqlSync(
+        "SELECT processed FROM pay_callback WHERE payment_no = $1",
+        paymentNo);
+    CHECK(callbackRows.size() >= 1);
+    CHECK(callbackRows.front()["processed"].as<bool>());
+
     client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
+    client->execSqlSync("DELETE FROM pay_callback WHERE payment_no = $1",
+                        paymentNo);
     client->execSqlSync("DELETE FROM pay_refund WHERE refund_no = $1",
                         refundNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1",
