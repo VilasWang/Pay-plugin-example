@@ -694,12 +694,36 @@ DROGON_TEST(PayPlugin_QueryRefund_WechatSuccess)
         refund.getValueOfId());
     CHECK(updated.getValueOfStatus() == "REFUND_SUCCESS");
     CHECK(updated.getValueOfChannelRefundNo() == "wx_refund_1");
+    CHECK(!updated.getValueOfResponsePayload().empty());
+    {
+        Json::CharReaderBuilder builder;
+        std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+        Json::Value payload;
+        std::string errors;
+        const auto responsePayload = updated.getValueOfResponsePayload();
+        CHECK(reader->parse(responsePayload.data(),
+                            responsePayload.data() + responsePayload.size(),
+                            &payload,
+                            &errors));
+        CHECK(payload.get("refund_id", "").asString() == "wx_refund_1");
+        CHECK(payload.get("out_refund_no", "").asString() == refundNo);
+    }
 
-    const auto ledgerRows = client->execSqlSync(
-        "SELECT COUNT(*) AS cnt FROM pay_ledger WHERE order_no = $1",
-        orderNo);
-    CHECK(!ledgerRows.empty());
-    CHECK(ledgerRows.front()["cnt"].as<int64_t>() == 1);
+    int64_t ledgerCount = 0;
+    for (int i = 0; i < 20; ++i)
+    {
+        const auto ledgerRows = client->execSqlSync(
+            "SELECT COUNT(*) AS cnt FROM pay_ledger WHERE order_no = $1",
+            orderNo);
+        CHECK(!ledgerRows.empty());
+        ledgerCount = ledgerRows.front()["cnt"].as<int64_t>();
+        if (ledgerCount == 1)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(ledgerCount == 1);
 
     drogon::app().quit();
     if (serverThread.joinable())

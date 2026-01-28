@@ -419,6 +419,7 @@ void PayPlugin::syncRefundStatusFromWechat(
 
     const std::string refundStatus = mapRefundStatus(wechatStatus);
     const std::string refundId = result.get("refund_id", "").asString();
+    const std::string responsePayload = toJsonString(result);
 
     LOG_INFO << "Sync refund status from WeChat: refund_no=" << refundNo
              << " wechat_status=" << wechatStatus
@@ -449,7 +450,7 @@ void PayPlugin::syncRefundStatusFromWechat(
                                           refundNo);
     refundMapper.findOne(
         criteria,
-        [this, refundStatus, refundId, done](
+        [this, refundStatus, refundId, responsePayload, done](
             PayRefundModel refund) {
             if (refund.getValueOfStatus() == "REFUND_SUCCESS")
             {
@@ -464,6 +465,7 @@ void PayPlugin::syncRefundStatusFromWechat(
             const auto refundAmount = refund.getValueOfAmount();
             refund.setStatus(refundStatus);
             refund.setChannelRefundNo(refundId);
+            refund.setResponsePayload(responsePayload);
             refund.setUpdatedAt(trantor::Date::now());
 
             drogon::orm::Mapper<PayRefundModel> refundUpdater(dbClient_);
