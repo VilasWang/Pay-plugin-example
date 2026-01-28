@@ -1784,6 +1784,14 @@ void PayPlugin::handleWechatCallback(
         return;
     }
 
+    const std::string eventType =
+        notifyJson.get("event_type", "").asString();
+    if (eventType.empty())
+    {
+        respond(drogon::k400BadRequest, "missing event_type");
+        return;
+    }
+
     if (!notifyJson.isMember("resource"))
     {
         respond(drogon::k400BadRequest, "missing resource");
@@ -1864,6 +1872,11 @@ void PayPlugin::handleWechatCallback(
 
     if (isRefundCallback)
     {
+        if (eventType.rfind("REFUND.", 0) != 0)
+        {
+            respond(drogon::k400BadRequest, "invalid refund event_type");
+            return;
+        }
         if (refundNo.empty() || refundStatusRaw.empty())
         {
             respond(drogon::k400BadRequest,
@@ -2159,9 +2172,23 @@ void PayPlugin::handleWechatCallback(
         plainJson.get("transaction_id", "").asString();
     const std::string tradeState =
         plainJson.get("trade_state", "").asString();
+    if (eventType.rfind("TRANSACTION.", 0) != 0)
+    {
+        respond(drogon::k400BadRequest, "invalid transaction event_type");
+        return;
+    }
     if (orderNo.empty() || tradeState.empty())
     {
         respond(drogon::k400BadRequest, "missing out_trade_no/trade_state");
+        return;
+    }
+    const bool tradeStateValid =
+        tradeState == "SUCCESS" || tradeState == "USERPAYING" ||
+        tradeState == "NOTPAY" || tradeState == "CLOSED" ||
+        tradeState == "REVOKED" || tradeState == "REFUND";
+    if (!tradeStateValid)
+    {
+        respond(drogon::k400BadRequest, "invalid trade_state");
         return;
     }
 
