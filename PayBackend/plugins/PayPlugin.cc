@@ -165,6 +165,127 @@ std::string toRfc3339Utc(const trantor::Date &when)
     return buffer;
 }
 
+void ensureCallbackRecordedForPayment(
+    const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+    const std::string &paymentNo,
+    const std::string &rawBody,
+    const std::string &signature,
+    const std::string &serial,
+    bool processed)
+{
+    if (!dbClient || paymentNo.empty())
+    {
+        return;
+    }
+
+    dbClient->execSqlAsync(
+        "SELECT 1 FROM pay_callback WHERE payment_no = $1 AND raw_body = $2 "
+        "LIMIT 1",
+        [dbClient, paymentNo, rawBody, signature, serial, processed](
+            const drogon::orm::Result &rows) {
+            if (!rows.empty())
+            {
+                return;
+            }
+            PayCallbackModel callbackRow;
+            callbackRow.setPaymentNo(paymentNo);
+            callbackRow.setRawBody(rawBody);
+            callbackRow.setSignature(signature);
+            callbackRow.setSerialNo(serial);
+            callbackRow.setVerified(true);
+            callbackRow.setProcessed(processed);
+            callbackRow.setReceivedAt(trantor::Date::now());
+
+            drogon::orm::Mapper<PayCallbackModel> callbackMapper(dbClient);
+            callbackMapper.insert(
+                callbackRow,
+                [](const PayCallbackModel &) {},
+                [](const drogon::orm::DrogonDbException &e) {
+                    LOG_ERROR << "Callback insert error: " << e.base().what();
+                });
+        },
+        [](const drogon::orm::DrogonDbException &e) {
+            LOG_ERROR << "Callback lookup error: " << e.base().what();
+        },
+        paymentNo,
+        rawBody);
+}
+
+void ensureCallbackRecordedForOrder(
+    const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+    const std::string &orderNo,
+    const std::string &rawBody,
+    const std::string &signature,
+    const std::string &serial,
+    bool processed)
+{
+    if (!dbClient || orderNo.empty())
+    {
+        return;
+    }
+
+    drogon::orm::Mapper<PayPaymentModel> paymentMapper(dbClient);
+    auto criteria = drogon::orm::Criteria(PayPaymentModel::Cols::_order_no,
+                                          drogon::orm::CompareOperator::EQ,
+                                          orderNo);
+    paymentMapper.orderBy(PayPaymentModel::Cols::_created_at,
+                          drogon::orm::SortOrder::DESC)
+        .limit(1)
+        .findBy(
+            criteria,
+            [dbClient, rawBody, signature, serial, processed](
+                const std::vector<PayPaymentModel> &rows) {
+                if (rows.empty())
+                {
+                    return;
+                }
+                ensureCallbackRecordedForPayment(
+                    dbClient,
+                    rows.front().getValueOfPaymentNo(),
+                    rawBody,
+                    signature,
+                    serial,
+                    processed);
+            },
+            [](const drogon::orm::DrogonDbException &e) {
+                LOG_ERROR << "Callback payment lookup error: "
+                          << e.base().what();
+            });
+}
+
+void ensureCallbackRecordedForRefund(
+    const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+    const std::string &refundNo,
+    const std::string &rawBody,
+    const std::string &signature,
+    const std::string &serial,
+    bool processed)
+{
+    if (!dbClient || refundNo.empty())
+    {
+        return;
+    }
+
+    drogon::orm::Mapper<PayRefundModel> refundMapper(dbClient);
+    auto criteria = drogon::orm::Criteria(PayRefundModel::Cols::_refund_no,
+                                          drogon::orm::CompareOperator::EQ,
+                                          refundNo);
+    refundMapper.findOne(
+        criteria,
+        [dbClient, rawBody, signature, serial, processed](
+            const PayRefundModel &refund) {
+            ensureCallbackRecordedForPayment(dbClient,
+                                             refund.getValueOfPaymentNo(),
+                                             rawBody,
+                                             signature,
+                                             serial,
+                                             processed);
+        },
+        [](const drogon::orm::DrogonDbException &e) {
+            LOG_ERROR << "Callback refund lookup error: " << e.base().what();
+        });
+}
+
 }  // namespace
 
 void PayPlugin::initAndStart(const Json::Value &config)
@@ -2029,7 +2150,18 @@ void PayPlugin::handleWechatCallback(
                                       idempotencyKey);
             idempMapper.findOne(
                 idempCriteria,
-                [callbackPtr](const PayIdempotencyModel &) {
+                [this,
+                 callbackPtr,
+                 refundNo,
+                 body,
+                 signature,
+                 serial](const PayIdempotencyModel &) {
+                    ensureCallbackRecordedForRefund(dbClient_,
+                                                   refundNo,
+                                                   body,
+                                                   signature,
+                                                   serial,
+                                                   true);
                     Json::Value ok;
                     ok["code"] = "SUCCESS";
                     ok["message"] = "OK";
@@ -2399,7 +2531,18 @@ void PayPlugin::handleWechatCallback(
                                   idempotencyKey);
         idempMapper.findOne(
             idempCriteria,
-            [callbackPtr](const PayIdempotencyModel &) {
+            [this,
+             callbackPtr,
+             orderNo,
+             body,
+             signature,
+             serial](const PayIdempotencyModel &) {
+                ensureCallbackRecordedForOrder(dbClient_,
+                                               orderNo,
+                                               body,
+                                               signature,
+                                               serial,
+                                               true);
                 Json::Value ok;
                 ok["code"] = "SUCCESS";
                 ok["message"] = "OK";
