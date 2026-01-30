@@ -41,28 +41,71 @@ void insertLedgerEntry(
         return;
     }
 
-    PayLedgerModel ledger;
-    ledger.setUserId(userId);
-    ledger.setOrderNo(orderNo);
+    auto insertRow = [dbClient, userId, orderNo, paymentNo, entryType, amount]() {
+        PayLedgerModel ledger;
+        ledger.setUserId(userId);
+        ledger.setOrderNo(orderNo);
+        if (paymentNo.empty())
+        {
+            ledger.setPaymentNoToNull();
+        }
+        else
+        {
+            ledger.setPaymentNo(paymentNo);
+        }
+        ledger.setEntryType(entryType);
+        ledger.setAmount(amount);
+        ledger.setCreatedAt(trantor::Date::now());
+
+        drogon::orm::Mapper<PayLedgerModel> ledgerMapper(dbClient);
+        ledgerMapper.insert(
+            ledger,
+            [](const PayLedgerModel &) {},
+            [](const drogon::orm::DrogonDbException &e) {
+                LOG_ERROR << "Ledger insert error: " << e.base().what();
+            });
+    };
+
+    if (orderNo.empty() || entryType.empty())
+    {
+        insertRow();
+        return;
+    }
+
     if (paymentNo.empty())
     {
-        ledger.setPaymentNoToNull();
+        dbClient->execSqlAsync(
+            "SELECT 1 FROM pay_ledger WHERE order_no = $1 "
+            "AND entry_type = $2 AND payment_no IS NULL LIMIT 1",
+            [insertRow](const drogon::orm::Result &rows) {
+                if (rows.empty())
+                {
+                    insertRow();
+                }
+            },
+            [](const drogon::orm::DrogonDbException &e) {
+                LOG_ERROR << "Ledger lookup error: " << e.base().what();
+            },
+            orderNo,
+            entryType);
+        return;
     }
-    else
-    {
-        ledger.setPaymentNo(paymentNo);
-    }
-    ledger.setEntryType(entryType);
-    ledger.setAmount(amount);
-    ledger.setCreatedAt(trantor::Date::now());
 
-    drogon::orm::Mapper<PayLedgerModel> ledgerMapper(dbClient);
-    ledgerMapper.insert(
-        ledger,
-        [](const PayLedgerModel &) {},
+    dbClient->execSqlAsync(
+        "SELECT 1 FROM pay_ledger WHERE order_no = $1 "
+        "AND entry_type = $2 AND payment_no = $3 LIMIT 1",
+        [insertRow](const drogon::orm::Result &rows) {
+            if (rows.empty())
+            {
+                insertRow();
+            }
+        },
         [](const drogon::orm::DrogonDbException &e) {
-            LOG_ERROR << "Ledger insert error: " << e.base().what();
-        });
+            LOG_ERROR << "Ledger lookup error: " << e.base().what();
+        },
+        orderNo,
+        entryType,
+        paymentNo);
 }
 
 void storeIdempotencySnapshot(
