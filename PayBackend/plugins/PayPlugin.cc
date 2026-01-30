@@ -1925,6 +1925,11 @@ void PayPlugin::handleWechatCallback(
                     "missing refund_no/refund_status");
             return;
         }
+        if (refundStatusRaw == "SUCCESS" && refundId.empty())
+        {
+            respond(drogon::k400BadRequest, "missing refund_id");
+            return;
+        }
         if (associatedData != "refund")
         {
             respond(drogon::k400BadRequest, "invalid refund associated_data");
