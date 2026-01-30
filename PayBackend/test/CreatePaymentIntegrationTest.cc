@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <atomic>
 #include <thread>
 #include "../models/PayIdempotency.h"
 #include "../plugins/PayPlugin.h"
@@ -168,6 +169,7 @@ void ensureCreatePaymentTables(
         "status VARCHAR(24) NOT NULL,"
         "channel VARCHAR(16) NOT NULL,"
         "title VARCHAR(128) NOT NULL,"
+        "expire_at TIMESTAMPTZ,"
         "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
         "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
     client->execSqlSync(
@@ -299,15 +301,33 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
     ensureCreatePaymentTables(client);
 
     const uint16_t port = 24088;
+    std::atomic<bool> sawExpire(false);
     drogon::app().addListener("127.0.0.1", port);
     drogon::app().registerHandler(
         "/v3/pay/transactions/native",
-        [](const drogon::HttpRequestPtr &req,
+        [&sawExpire](const drogon::HttpRequestPtr &req,
            std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
-            Json::Value body;
-            body["code_url"] = "weixin://wxpay/mock_qr";
-            body["prepay_id"] = "prepay_mock_1";
-            auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
+            Json::CharReaderBuilder builder;
+            std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+            Json::Value json;
+            std::string errors;
+            const auto rawBody = std::string(req->body());
+            if (reader->parse(rawBody.data(),
+                              rawBody.data() + rawBody.size(),
+                              &json,
+                              &errors))
+            {
+                if (json.isMember("time_expire") &&
+                    json["time_expire"].isString() &&
+                    !json["time_expire"].asString().empty())
+                {
+                    sawExpire.store(true);
+                }
+            }
+            Json::Value respBody;
+            respBody["code_url"] = "weixin://wxpay/mock_qr";
+            respBody["prepay_id"] = "prepay_mock_1";
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(respBody);
             cb(resp);
         },
         {drogon::Post});
@@ -340,6 +360,7 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
     payload["amount"] = "9.99";
     payload["currency"] = "CNY";
     payload["title"] = title;
+    payload["expire_seconds"] = 600;
     const std::string body = pay::utils::toJsonString(payload);
 
     auto req = drogon::HttpRequest::newHttpRequest();
@@ -366,9 +387,15 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
     CHECK((*respJson)["code_url"].asString() ==
           "weixin://wxpay/mock_qr");
     CHECK((*respJson)["prepay_id"].asString() == "prepay_mock_1");
+    CHECK(sawExpire.load());
 
     std::string orderNo;
     CHECK(waitForOrderStatus(client, title, orderNo, "PAYING", "PROCESSING"));
+    const auto expireRows = client->execSqlSync(
+        "SELECT expire_at FROM pay_order WHERE order_no = $1",
+        orderNo);
+    CHECK(expireRows.size() >= 1);
+    CHECK(!expireRows.front()["expire_at"].isNull());
 
     drogon::app().quit();
     if (serverThread.joinable())

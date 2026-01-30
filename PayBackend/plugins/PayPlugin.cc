@@ -12,6 +12,7 @@
 #include <drogon/utils/Utilities.h>
 #include <atomic>
 #include <memory>
+#include <ctime>
 #include <trantor/utils/Date.h>
 
 namespace
@@ -149,6 +150,20 @@ std::string resolveIdempotencyKey(const drogon::HttpRequestPtr &req)
     return key;
 }
 
+std::string toRfc3339Utc(const trantor::Date &when)
+{
+    const auto seconds =
+        static_cast<time_t>(when.microSecondsSinceEpoch() / 1000000);
+    std::tm tmUtc{};
+    gmtime_s(&tmUtc, &seconds);
+    char buffer[32]{};
+    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tmUtc) ==
+        0)
+    {
+        return {};
+    }
+    return buffer;
+}
 
 }  // namespace
 
@@ -567,6 +582,7 @@ void PayPlugin::proceedCreatePayment(
     const std::string &amount,
     const std::string &currency,
     const std::string &title,
+    const std::shared_ptr<trantor::Date> &expireAt,
     int64_t totalFen,
     int64_t userIdValue,
     const std::string &idempotencyKey,
@@ -581,6 +597,10 @@ void PayPlugin::proceedCreatePayment(
     order.setStatus("CREATED");
     order.setChannel("wechat");
     order.setTitle(title);
+    if (expireAt)
+    {
+        order.setExpireAt(*expireAt);
+    }
     order.setCreatedAt(trantor::Date::now());
     order.setUpdatedAt(trantor::Date::now());
 
@@ -589,6 +609,14 @@ void PayPlugin::proceedCreatePayment(
     payload["out_trade_no"] = orderNo;
     payload["amount"]["total"] = static_cast<Json::Int64>(totalFen);
     payload["amount"]["currency"] = currency;
+    if (expireAt)
+    {
+        const auto expireText = toRfc3339Utc(*expireAt);
+        if (!expireText.empty())
+        {
+            payload["time_expire"] = expireText;
+        }
+    }
     const std::string requestPayload = toJsonString(payload);
 
     orderMapper.insert(
@@ -1174,6 +1202,41 @@ void PayPlugin::createPayment(
     std::string currency = (*json).get("currency", "CNY").asString();
     std::string orderNo = drogon::utils::getUuid();
     std::string paymentNo = drogon::utils::getUuid();
+    std::shared_ptr<trantor::Date> expireAt;
+    if ((*json).isMember("expire_seconds"))
+    {
+        int64_t expireSeconds = 0;
+        const auto &expireNode = (*json)["expire_seconds"];
+        try
+        {
+            if (expireNode.isNumeric())
+            {
+                expireSeconds = expireNode.asInt64();
+            }
+            else if (expireNode.isString())
+            {
+                expireSeconds = std::stoll(expireNode.asString());
+            }
+        }
+        catch (...)
+        {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k400BadRequest);
+            resp->setBody("invalid expire_seconds");
+            callback(resp);
+            return;
+        }
+        if (expireSeconds <= 0)
+        {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k400BadRequest);
+            resp->setBody("invalid expire_seconds");
+            callback(resp);
+            return;
+        }
+        expireAt = std::make_shared<trantor::Date>(
+            trantor::Date::now().after(static_cast<double>(expireSeconds)));
+    }
 
     int64_t totalFen = 0;
     if (!parseAmountToFen(amount, totalFen))
@@ -1218,6 +1281,7 @@ void PayPlugin::createPayment(
                               amount,
                               currency,
                               title,
+                              expireAt,
                               totalFen,
                               userIdValue,
                               idempotencyKey,
@@ -1228,6 +1292,7 @@ void PayPlugin::createPayment(
                              amount,
                              currency,
                              title,
+                             expireAt,
                              totalFen,
                              userIdValue,
                              idempotencyKey,

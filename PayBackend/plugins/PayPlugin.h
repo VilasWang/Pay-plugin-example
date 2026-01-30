@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <trantor/net/EventLoop.h>
+#include <trantor/utils/Date.h>
 #include "WechatPayClient.h"
 
 class PayPlugin : public drogon::Plugin<PayPlugin>
@@ -65,6 +66,7 @@ class PayPlugin : public drogon::Plugin<PayPlugin>
         const std::string &amount,
         const std::string &currency,
         const std::string &title,
+        const std::shared_ptr<trantor::Date> &expireAt,
         int64_t totalFen,
         int64_t userIdValue,
         const std::string &idempotencyKey,
