@@ -2295,6 +2295,11 @@ void PayPlugin::handleWechatCallback(
         respond(drogon::k400BadRequest, "invalid trade_state");
         return;
     }
+    if (tradeState == "SUCCESS" && transactionId.empty())
+    {
+        respond(drogon::k400BadRequest, "missing transaction_id");
+        return;
+    }
 
     std::string idempotencyKey = notifyJson.get("id", "").asString();
     if (idempotencyKey.empty())
