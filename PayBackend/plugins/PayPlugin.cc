@@ -628,7 +628,7 @@ void PayPlugin::syncRefundStatusFromWechat(
                                           refundNo);
     refundMapper.findOne(
         criteria,
-        [this, refundStatus, refundId, refundNo, done](PayRefundModel refund) {
+        [this, refundStatus, refundId, refundNo, result, done](PayRefundModel refund) {
             if (refund.getValueOfStatus() == "REFUND_SUCCESS")
             {
                 if (done)
@@ -652,7 +652,17 @@ void PayPlugin::syncRefundStatusFromWechat(
                  refundStatus,
                  orderNo,
                  paymentNo,
-                 refundAmount](const size_t) {
+                 refundAmount,
+                 refundNo,
+                 result](const size_t) {
+                    const std::string responsePayload = toJsonString(result);
+                    dbClient_->execSqlAsync(
+                        "UPDATE pay_refund SET response_payload = $1 "
+                        "WHERE refund_no = $2",
+                        [](const drogon::orm::Result &) {},
+                        [](const drogon::orm::DrogonDbException &) {},
+                        responsePayload,
+                        refundNo);
                     if (done)
                     {
                         done(refundStatus);
@@ -2357,19 +2367,20 @@ void PayPlugin::handleWechatCallback(
                                             drogon::orm::CompareOperator::EQ,
                                             orderNo);
                                     orderMapper.findOne(
-                                        orderCriteria,
-                                        [this,
-                                         callbackPtr,
-                                         refundStatus,
-                                         refundId,
-                                         refundAmount,
-                                         orderNo,
-                                         paymentNo,
-                                         notifyCurrency,
-                                         signature,
-                                         serial,
+                                    orderCriteria,
+                                    [this,
+                                     callbackPtr,
+                                     refundStatus,
+                                     refundId,
+                                     refundAmount,
+                                     orderNo,
+                                     paymentNo,
+                                     notifyCurrency,
+                                     signature,
+                                     serial,
                                          refundNo,
                                          body,
+                                         plaintext,
                                          refund](const PayOrderModel &order) mutable {
                                             const std::string orderCurrency =
                                                 order.getValueOfCurrency();
@@ -2401,10 +2412,19 @@ void PayPlugin::handleWechatCallback(
                                                  orderNo,
                                                  paymentNo,
                                                  order,
-                                                signature,
-                                                serial,
-                                                body,
-                                                refundNo](const size_t) {
+                                                 signature,
+                                                 serial,
+                                                 body,
+                                                 refundNo,
+                                                 plaintext](const size_t) {
+                                                    dbClient_->execSqlAsync(
+                                                        "UPDATE pay_refund "
+                                                        "SET response_payload = $1 "
+                                                        "WHERE refund_no = $2",
+                                                        [](const drogon::orm::Result &) {},
+                                                        [](const drogon::orm::DrogonDbException &) {},
+                                                        plaintext,
+                                                        refundNo);
                                                     if (refundStatus ==
                                                         "REFUND_SUCCESS")
                                                     {

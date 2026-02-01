@@ -698,6 +698,26 @@ DROGON_TEST(PayPlugin_QueryRefund_WechatSuccess)
     CHECK(updated.getValueOfStatus() == "REFUND_SUCCESS");
     CHECK(updated.getValueOfChannelRefundNo() == "wx_refund_1");
 
+    int64_t payloadReady = 0;
+    for (int i = 0; i < 20; ++i)
+    {
+        const auto payloadRows = client->execSqlSync(
+            "SELECT response_payload FROM pay_refund WHERE refund_no = $1",
+            refundNo);
+        if (!payloadRows.empty() && !payloadRows.front()["response_payload"].isNull())
+        {
+            const auto payload =
+                payloadRows.front()["response_payload"].as<std::string>();
+            if (payload.find("wx_refund_1") != std::string::npos)
+            {
+                payloadReady = 1;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(payloadReady == 1);
+
     int64_t ledgerCount = 0;
     for (int i = 0; i < 20; ++i)
     {
