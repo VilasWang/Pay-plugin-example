@@ -346,6 +346,15 @@ DROGON_TEST(PayPlugin_QueryOrder_WechatSuccess)
         "response_payload TEXT,"
         "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
         "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+    client->execSqlSync(
+        "CREATE TABLE IF NOT EXISTS pay_ledger ("
+        "id BIGSERIAL PRIMARY KEY,"
+        "user_id BIGINT NOT NULL,"
+        "order_no VARCHAR(64) NOT NULL,"
+        "payment_no VARCHAR(64),"
+        "entry_type VARCHAR(16) NOT NULL,"
+        "amount DECIMAL(18,2) NOT NULL,"
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
 
     const std::string orderNo = "ord_" + drogon::utils::getUuid();
     const std::string paymentNo = "pay_" + drogon::utils::getUuid();
@@ -446,6 +455,22 @@ DROGON_TEST(PayPlugin_QueryOrder_WechatSuccess)
     CHECK(updatedPayment.getValueOfStatus() == "SUCCESS");
     CHECK(updatedPayment.getValueOfChannelTradeNo() == "wx_txn_1");
 
+    int64_t ledgerCount = 0;
+    for (int i = 0; i < 20; ++i)
+    {
+        const auto ledgerRows = client->execSqlSync(
+            "SELECT COUNT(*) AS cnt FROM pay_ledger WHERE order_no = $1",
+            orderNo);
+        CHECK(!ledgerRows.empty());
+        ledgerCount = ledgerRows.front()["cnt"].as<int64_t>();
+        if (ledgerCount == 1)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(ledgerCount == 1);
+
     drogon::app().quit();
     if (serverThread.joinable())
     {
@@ -454,6 +479,7 @@ DROGON_TEST(PayPlugin_QueryOrder_WechatSuccess)
 
     std::error_code ec;
     std::filesystem::remove(keyPath, ec);
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1",
                         paymentNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);

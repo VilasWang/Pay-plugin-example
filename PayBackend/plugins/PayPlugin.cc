@@ -523,11 +523,10 @@ void PayPlugin::syncOrderStatusFromWechat(
                 payment.setChannelTradeNo(transactionId);
                 payment.setResponsePayload(responsePayload);
                 payment.setUpdatedAt(trantor::Date::now());
-
                 drogon::orm::Mapper<PayPaymentModel> paymentUpdater(dbClient_);
                 paymentUpdater.update(
                     payment,
-                    [this, orderNo, orderStatus, done](const size_t) {
+                    [this, orderNo, orderStatus, paymentNo, done](const size_t) {
                         drogon::orm::Mapper<PayOrderModel> orderMapper(
                             dbClient_);
                         auto orderCriteria =
@@ -537,7 +536,10 @@ void PayPlugin::syncOrderStatusFromWechat(
                                 orderNo);
                         orderMapper.findOne(
                             orderCriteria,
-                            [this, orderStatus, done](PayOrderModel order) {
+                            [this,
+                             orderStatus,
+                             paymentNo,
+                             done](PayOrderModel order) {
                                 if (order.getValueOfStatus() == "PAID")
                                 {
                                     if (done)
@@ -546,13 +548,32 @@ void PayPlugin::syncOrderStatusFromWechat(
                                     }
                                     return;
                                 }
+                                const auto userId = order.getValueOfUserId();
+                                const auto orderAmount = order.getValueOfAmount();
+                                const auto orderNo = order.getValueOfOrderNo();
                                 order.setStatus(orderStatus);
                                 order.setUpdatedAt(trantor::Date::now());
                                 drogon::orm::Mapper<PayOrderModel>
                                     orderUpdater(dbClient_);
                                 orderUpdater.update(
                                     order,
-                                    [done, orderStatus](const size_t) {
+                                    [this,
+                                     done,
+                                     orderStatus,
+                                     userId,
+                                     orderNo,
+                                     paymentNo,
+                                     orderAmount](const size_t) {
+                                        if (orderStatus == "PAID")
+                                        {
+                                            insertLedgerEntry(
+                                                dbClient_,
+                                                userId,
+                                                orderNo,
+                                                paymentNo,
+                                                "PAYMENT",
+                                                orderAmount);
+                                        }
                                         if (done)
                                         {
                                             done(orderStatus);
