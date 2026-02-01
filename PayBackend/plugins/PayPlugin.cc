@@ -513,10 +513,59 @@ void PayPlugin::syncOrderStatusFromWechat(
                 const auto paymentNo = payment.getValueOfPaymentNo();
                 if (payment.getValueOfStatus() == "SUCCESS")
                 {
-                    if (done)
-                    {
-                        done(orderStatus);
-                    }
+                    drogon::orm::Mapper<PayOrderModel> orderMapper(dbClient_);
+                    auto orderCriteria =
+                        drogon::orm::Criteria(
+                            PayOrderModel::Cols::_order_no,
+                            drogon::orm::CompareOperator::EQ,
+                            orderNo);
+                    orderMapper.findOne(
+                        orderCriteria,
+                        [this,
+                         orderStatus,
+                         paymentNo,
+                         done](PayOrderModel order) {
+                            if (order.getValueOfStatus() != "PAID")
+                            {
+                                const auto userId = order.getValueOfUserId();
+                                const auto orderAmount = order.getValueOfAmount();
+                                const auto orderNo = order.getValueOfOrderNo();
+                                order.setStatus(orderStatus);
+                                order.setUpdatedAt(trantor::Date::now());
+                                drogon::orm::Mapper<PayOrderModel>
+                                    orderUpdater(dbClient_);
+                                orderUpdater.update(
+                                    order,
+                                    [this,
+                                     orderStatus,
+                                     userId,
+                                     orderNo,
+                                     paymentNo,
+                                     orderAmount](const size_t) {
+                                        if (orderStatus == "PAID")
+                                        {
+                                            insertLedgerEntry(
+                                                dbClient_,
+                                                userId,
+                                                orderNo,
+                                                paymentNo,
+                                                "PAYMENT",
+                                                orderAmount);
+                                        }
+                                    },
+                                    [](const drogon::orm::DrogonDbException &) {});
+                            }
+                            if (done)
+                            {
+                                done(orderStatus);
+                            }
+                        },
+                        [done, orderStatus](const drogon::orm::DrogonDbException &) {
+                            if (done)
+                            {
+                                done(orderStatus);
+                            }
+                        });
                     return;
                 }
                 payment.setStatus(paymentStatus);
