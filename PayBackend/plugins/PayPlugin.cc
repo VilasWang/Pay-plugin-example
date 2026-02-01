@@ -703,6 +703,10 @@ void PayPlugin::proceedCreatePayment(
     const std::string &amount,
     const std::string &currency,
     const std::string &title,
+    const std::string &notifyUrlOverride,
+    const std::string &attach,
+    const Json::Value &sceneInfo,
+    bool hasSceneInfo,
     const std::shared_ptr<trantor::Date> &expireAt,
     int64_t totalFen,
     int64_t userIdValue,
@@ -730,6 +734,18 @@ void PayPlugin::proceedCreatePayment(
     payload["out_trade_no"] = orderNo;
     payload["amount"]["total"] = static_cast<Json::Int64>(totalFen);
     payload["amount"]["currency"] = currency;
+    if (!notifyUrlOverride.empty())
+    {
+        payload["notify_url"] = notifyUrlOverride;
+    }
+    if (!attach.empty())
+    {
+        payload["attach"] = attach;
+    }
+    if (hasSceneInfo)
+    {
+        payload["scene_info"] = sceneInfo;
+    }
     if (expireAt)
     {
         const auto expireText = toRfc3339Utc(*expireAt);
@@ -1323,7 +1339,48 @@ void PayPlugin::createPayment(
     std::string currency = (*json).get("currency", "CNY").asString();
     std::string orderNo = drogon::utils::getUuid();
     std::string paymentNo = drogon::utils::getUuid();
+    std::string notifyUrlOverride;
+    std::string attach;
+    Json::Value sceneInfo;
+    bool hasSceneInfo = false;
     std::shared_ptr<trantor::Date> expireAt;
+    if ((*json).isMember("notify_url"))
+    {
+        if (!(*json)["notify_url"].isString())
+        {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k400BadRequest);
+            resp->setBody("invalid notify_url");
+            callback(resp);
+            return;
+        }
+        notifyUrlOverride = (*json)["notify_url"].asString();
+    }
+    if ((*json).isMember("attach"))
+    {
+        if (!(*json)["attach"].isString())
+        {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k400BadRequest);
+            resp->setBody("invalid attach");
+            callback(resp);
+            return;
+        }
+        attach = (*json)["attach"].asString();
+    }
+    if ((*json).isMember("scene_info"))
+    {
+        if (!(*json)["scene_info"].isObject())
+        {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k400BadRequest);
+            resp->setBody("invalid scene_info");
+            callback(resp);
+            return;
+        }
+        sceneInfo = (*json)["scene_info"];
+        hasSceneInfo = true;
+    }
     if ((*json).isMember("expire_seconds"))
     {
         int64_t expireSeconds = 0;
@@ -1402,6 +1459,10 @@ void PayPlugin::createPayment(
                               amount,
                               currency,
                               title,
+                              notifyUrlOverride,
+                              attach,
+                              sceneInfo,
+                              hasSceneInfo,
                               expireAt,
                               totalFen,
                               userIdValue,
@@ -1413,6 +1474,10 @@ void PayPlugin::createPayment(
                              amount,
                              currency,
                              title,
+                             notifyUrlOverride,
+                             attach,
+                             sceneInfo,
+                             hasSceneInfo,
                              expireAt,
                              totalFen,
                              userIdValue,

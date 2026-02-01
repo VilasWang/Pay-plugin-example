@@ -302,10 +302,13 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
 
     const uint16_t port = 24088;
     std::atomic<bool> sawExpire(false);
+    std::atomic<bool> sawNotify(false);
+    std::atomic<bool> sawAttach(false);
+    std::atomic<bool> sawScene(false);
     drogon::app().addListener("127.0.0.1", port);
     drogon::app().registerHandler(
         "/v3/pay/transactions/native",
-        [&sawExpire](const drogon::HttpRequestPtr &req,
+        [&sawExpire, &sawNotify, &sawAttach, &sawScene](const drogon::HttpRequestPtr &req,
            std::function<void(const drogon::HttpResponsePtr &)> &&cb) {
             Json::CharReaderBuilder builder;
             std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
@@ -322,6 +325,23 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
                     !json["time_expire"].asString().empty())
                 {
                     sawExpire.store(true);
+                }
+                if (json.isMember("notify_url") &&
+                    json["notify_url"].asString() == "https://notify.override")
+                {
+                    sawNotify.store(true);
+                }
+                if (json.isMember("attach") &&
+                    json["attach"].asString() == "meta_attach")
+                {
+                    sawAttach.store(true);
+                }
+                if (json.isMember("scene_info") &&
+                    json["scene_info"].isObject() &&
+                    json["scene_info"].get("payer_client_ip", "").asString() ==
+                        "203.0.113.10")
+                {
+                    sawScene.store(true);
                 }
             }
             Json::Value respBody;
@@ -361,6 +381,9 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
     payload["currency"] = "CNY";
     payload["title"] = title;
     payload["expire_seconds"] = 600;
+    payload["notify_url"] = "https://notify.override";
+    payload["attach"] = "meta_attach";
+    payload["scene_info"]["payer_client_ip"] = "203.0.113.10";
     const std::string body = pay::utils::toJsonString(payload);
 
     auto req = drogon::HttpRequest::newHttpRequest();
@@ -388,6 +411,9 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
           "weixin://wxpay/mock_qr");
     CHECK((*respJson)["prepay_id"].asString() == "prepay_mock_1");
     CHECK(sawExpire.load());
+    CHECK(sawNotify.load());
+    CHECK(sawAttach.load());
+    CHECK(sawScene.load());
 
     std::string orderNo;
     CHECK(waitForOrderStatus(client, title, orderNo, "PAYING", "PROCESSING"));
